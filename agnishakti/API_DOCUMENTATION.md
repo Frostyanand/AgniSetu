@@ -173,6 +173,174 @@ PROVIDER_SECRET=your_provider_secret_key
 
 ---
 
+### House Management Endpoints
+
+#### POST `/api/houses`
+**Description**: Create a new house for a property owner.
+
+**Request Body**:
+```json
+{
+  "ownerEmail": "owner@example.com",
+  "address": "123 Main Street, City, State",
+  "coords": {
+    "lat": 40.7128,
+    "lng": -74.0060
+  },
+  "monitorPassword": "secure_password",
+  "nearestFireStationId": "optional_station_id"
+}
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "houseId": "generated_house_id"
+}
+```
+
+**Backend Function**: `createHouse({ ownerEmail, address, coords, monitorPassword, nearestFireStationId })`
+- Creates new house document in Firestore
+- Hashes monitoring password with bcrypt
+- Sets default monitoring enabled to true
+- Generates unique house ID
+
+---
+
+#### GET `/api/houses?ownerEmail=owner@example.com`
+**Description**: Retrieve all houses for a specific owner.
+
+**Query Parameters**:
+- `ownerEmail`: Owner's email address
+
+**Response**:
+```json
+{
+  "success": true,
+  "houses": [
+    {
+      "houseId": "house_id",
+      "ownerEmail": "owner@example.com",
+      "address": "123 Main Street",
+      "coords": {"lat": 40.7128, "lng": -74.0060},
+      "nearestFireStationId": "station_id",
+      "monitoringEnabled": true,
+      "createdAt": "timestamp"
+    }
+  ]
+}
+```
+
+**Backend Function**: `getHousesByOwnerEmail(ownerEmail)`
+- Queries houses collection by owner email
+- Returns array of house documents
+
+---
+
+#### GET `/api/houses/[id]`
+**Description**: Retrieve a specific house by its ID.
+
+**URL Parameters**:
+- `id`: House ID
+
+**Response**:
+```json
+{
+  "success": true,
+  "house": {
+    "houseId": "house_id",
+    "ownerEmail": "owner@example.com",
+    "address": "123 Main Street",
+    "coords": {"lat": 40.7128, "lng": -74.0060},
+    "nearestFireStationId": "station_id",
+    "monitoringEnabled": true,
+    "createdAt": "timestamp"
+  }
+}
+```
+
+**Backend Function**: `getHouseById(houseId)`
+- Retrieves single house document by ID
+- Returns null if house doesn't exist
+
+---
+
+#### PATCH `/api/houses/[id]`
+**Description**: Update house properties.
+
+**URL Parameters**:
+- `id`: House ID
+
+**Request Body**:
+```json
+{
+  "address": "Updated address",
+  "coords": {"lat": 40.7128, "lng": -74.0060},
+  "nearestFireStationId": "new_station_id",
+  "monitoringEnabled": false
+}
+```
+
+**Response**:
+```json
+{
+  "success": true
+}
+```
+
+**Backend Function**: `updateHouse(houseId, updates)`
+- Updates house document with provided fields
+- Sets updatedAt timestamp
+- Uses merge to preserve existing fields
+
+---
+
+#### DELETE `/api/houses/[id]`
+**Description**: Delete a house (currently returns success message but doesn't actually delete).
+
+**URL Parameters**:
+- `id`: House ID
+
+**Response**:
+```json
+{
+  "success": true,
+  "message": "House house_id deleted."
+}
+```
+
+**Backend Function**: None (placeholder implementation)
+- **Note**: This endpoint currently doesn't actually delete the house
+- You may need to implement `deleteHouse` function in backend.js
+
+---
+
+#### POST `/api/houses/verify-password`
+**Description**: Verify monitoring password for a house.
+
+**Request Body**:
+```json
+{
+  "houseId": "house_id",
+  "password": "candidate_password"
+}
+```
+
+**Response**:
+```json
+{
+  "success": true
+}
+```
+
+**Backend Function**: `verifyHousePassword(houseId, candidatePassword)`
+- Compares provided password with stored hash
+- Returns boolean success status
+- Throws error if house not found
+
+---
+
 ### Camera Management Endpoints
 
 #### POST `/api/cameras`
@@ -344,7 +512,8 @@ PROVIDER_SECRET=your_provider_secret_key
 }
 ```
 
-**Backend Function**: `triggerAlert(payload)`
+**Backend Function**: `triggerAlert(cameraId, detectionImage)`
+**Note**: The actual implementation calls `triggerAlert` with two parameters, but the backend function expects a full payload object. This is a discrepancy that should be fixed.
 - **Complex workflow**:
   1. Validates service key for security
   2. Retrieves camera and associated house data
@@ -356,6 +525,37 @@ PROVIDER_SECRET=your_provider_secret_key
   8. Updates alert status to NOTIFIED
 - **Email notifications** include GPS links and detection images
 - **Privacy protection**: Skips image attachment if flagged as sensitive
+
+---
+
+#### POST `/api/alerts/verify`
+**Description**: Verify an image using Gemini AI for fire detection.
+
+**Request Body**:
+```json
+{
+  "imageUrl": "https://storage.googleapis.com/bucket/image.jpg"
+}
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "result": {
+    "isFire": true,
+    "score": 0.95,
+    "reason": "Clear fire detected in image",
+    "sensitive": false,
+    "sensitiveReason": "No sensitive content detected"
+  }
+}
+```
+
+**Backend Function**: `verifyWithGemini({ imageUrl })`
+- Uses Google Gemini AI to analyze image
+- Returns fire detection confidence and sensitive content check
+- Falls back to default values if Gemini is disabled or fails
 
 ---
 
@@ -568,5 +768,35 @@ Common HTTP status codes:
 5. Test provider registration with and without secret key
 6. Verify monitoring start/stop functionality
 7. Test alert cancellation workflow
+
+## Issues Found and Recommendations
+
+### **Critical Issues to Fix**
+
+1. **Alert Trigger Endpoint Mismatch**:
+   - **Issue**: `/api/alerts/trigger` calls `triggerAlert(cameraId, detectionImage)` but backend expects `triggerAlert(payload)`
+   - **Fix**: Update the endpoint to pass the full payload object with serviceKey, className, confidence, etc.
+
+2. **House Delete Endpoint**:
+   - **Issue**: `/api/houses/[id]` DELETE endpoint doesn't actually delete houses
+   - **Fix**: Implement `deleteHouse(houseId)` function in backend.js
+
+3. **Missing Service Key in Alert Trigger**:
+   - **Issue**: Alert trigger endpoint doesn't include required serviceKey for Python backend authentication
+   - **Fix**: Update endpoint to include serviceKey in request body
+
+### **Missing Backend Functions**
+- `deleteHouse(houseId)` - needed for house deletion
+- `getActiveAlertsForOwner(ownerEmail)` - exists in backend but no API endpoint
+
+### **API Endpoint Count**
+- **Total Endpoints**: 16
+- **Authentication**: 2 endpoints
+- **House Management**: 5 endpoints  
+- **Camera Management**: 3 endpoints
+- **Monitoring Control**: 2 endpoints
+- **Alert Management**: 3 endpoints
+- **Provider/Fire Station**: 2 endpoints
+- **System**: 1 endpoint
 
 This documentation provides a comprehensive overview of the AgniSetu API system, including all endpoints, backend functions, database structure, and integration requirements.

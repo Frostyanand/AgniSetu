@@ -37,18 +37,18 @@ export async function PATCH(req, { params }) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
 // DELETE /api/houses/[id] -> Delete a house
 export async function DELETE(req, { params }) {
     try {
-        const houseId = params.id; // Get the ID from the URL
+        const houseId = params.id;
         if (!houseId) {
             return NextResponse.json({ error: "House ID is required" }, { status: 400 });
         }
-        // Note: You may need to create a deleteHouse function in your backend.js
-        // For now, this assumes one exists or you will add it.
-        // await backend.deleteHouse(houseId); 
-        return NextResponse.json({ success: true, message: `House ${houseId} deleted.` });
+        
+        // Actually call the backend function to delete the house
+        await backend.deleteHouse(houseId); 
+        
+        return NextResponse.json({ success: true, message: `House ${houseId} was deleted.` });
     } catch (err) {
         return NextResponse.json({ error: err.message }, { status: 500 });
     }

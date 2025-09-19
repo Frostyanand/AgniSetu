@@ -1,0 +1,309 @@
+{
+  "info": {
+    "name": "AgniSetu API Collection - Full Ready",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "agni-setu-full-ready"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/api/health",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "health"]
+        }
+      }
+    },
+    {
+      "name": "Register User",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"anuragsujit2005@gmail.com\",\n  \"name\": \"Anurag\",\n  \"role\": \"owner\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/auth/register",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "auth", "register"]
+        }
+      }
+    },
+    {
+      "name": "Login User",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"aa9004@srmist.edu.in\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/auth/login",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "auth", "login"]
+        }
+      }
+    },
+    {
+      "name": "Create House",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ownerEmail\": \"anuragsujit2005@gmail.com\",\n  \"address\": \"123 Main Street, Chennai\",\n  \"coords\": {\"lat\": 13.0100, \"lng\": 80.2000},\n  \"monitorPassword\": \"secure_password\",\n  \"nearestFireStationId\": \"station_001\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/houses",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "houses"]
+        }
+      }
+    },
+    {
+      "name": "Get Houses by Owner",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/api/houses?ownerEmail=anuragsujit2005@gmail.com",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "houses"],
+          "query": [{"key": "ownerEmail", "value": "anuragsujit2005@gmail.com"}]
+        }
+      }
+    },
+    {
+      "name": "Get House by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/api/houses/{{houseId}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "houses", "{{houseId}}"]
+        }
+      }
+    },
+    {
+      "name": "Update House",
+      "request": {
+        "method": "PATCH",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"address\": \"Updated Address\",\n  \"coords\": {\"lat\": 13.0100, \"lng\": 80.2000},\n  \"nearestFireStationId\": \"station_002\",\n  \"monitoringEnabled\": false\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/houses/{{houseId}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "houses", "{{houseId}}"]
+        }
+      }
+    },
+    {
+      "name": "Delete House",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/api/houses/{{houseId}}",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "houses", "{{houseId}}"]
+        }
+      }
+    },
+    {
+      "name": "Add Camera",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ownerEmail\": \"anuragsujit2005@gmail.com\",\n  \"cameraName\": \"Front Door Camera\",\n  \"streamUrl\": \"rtsp://192.168.1.10:554/stream\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/cameras",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "cameras"]
+        }
+      }
+    },
+    {
+      "name": "Get Cameras by Owner",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/api/cameras?ownerEmail=anuragsujit2005@gmail.com",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "cameras"],
+          "query": [{"key": "ownerEmail", "value": "anuragsujit2005@gmail.com"}]
+        }
+      }
+    },
+    {
+      "name": "Delete Camera",
+      "request": {
+        "method": "DELETE",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cameraId\": \"{{cameraId}}\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/cameras",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "cameras"]
+        }
+      }
+    },
+    {
+      "name": "Start Monitoring",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\n  \"cameraId\": \"{{cameraId}}\"\n}"},
+        "url": {
+          "raw": "http://localhost:3000/api/monitoring/start",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "monitoring", "start"]
+        }
+      }
+    },
+    {
+      "name": "Stop Monitoring",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {"mode": "raw", "raw": "{\n  \"cameraId\": \"{{cameraId}}\"\n}"},
+        "url": {
+          "raw": "http://localhost:3000/api/monitoring/stop",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "monitoring", "stop"]
+        }
+      }
+    },
+    {
+      "name": "Trigger Alert",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"cameraId\": \"{{cameraId}}\",\n  \"detectionImage\": \"base64_image_data\",\n  \"serviceKey\": \"my_secret_service_key\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/alerts/trigger",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "alerts", "trigger"]
+        }
+      }
+    },
+    {
+      "name": "Verify Alert",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"imageUrl\": \"https://storage.googleapis.com/bucket/image.jpg\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/alerts/verify",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "alerts", "verify"]
+        }
+      }
+    },
+    {
+      "name": "Cancel Alert",
+      "request": {
+        "method": "POST",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"alertId\": \"{{alertId}}\"\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/alerts/cancel",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "alerts", "cancel"]
+        }
+      }
+    },
+    {
+      "name": "Register Fire Station",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "x-provider-secret", "value": "a-very-strong-and-secret-key-12345"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"aa9004@srmist.edu.in\",\n  \"name\": \"ChennaiFireStation\",\n  \"stationName\": \"Central Fire Station\",\n  \"stationAddress\": \"456 Firefighter Ave, Chennai\",\n  \"stationPhone\": \"+91-9876543210\",\n  \"coords\": {\"lat\": 13.0827, \"lng\": 80.2707}\n}"
+        },
+        "url": {
+          "raw": "http://localhost:3000/api/stations/register",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "stations", "register"]
+        }
+      }
+    },
+    {
+      "name": "Provider Dashboard",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:3000/api/provider/dashboard?providerEmail=aa9004@srmist.edu.in",
+          "protocol": "http",
+          "host": ["localhost"],
+          "port": "3000",
+          "path": ["api", "provider", "dashboard"],
+          "query": [{"key": "providerEmail", "value": "aa9004@srmist.edu.in"}]
+        }
+      }
+    }
+  ]
+}
