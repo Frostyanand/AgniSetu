@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getProviderDashboard } from "@/app/backend";
+import { getProviderDashboardData } from "@/app/backend";
 
 // GET /api/provider/dashboard?providerEmail=abc@xyz.com
 export async function GET(req) {
@@ -11,7 +11,7 @@ export async function GET(req) {
       return NextResponse.json({ error: "Missing providerEmail" }, { status: 400 });
     }
 
-    const dashboard = await getProviderDashboard(providerEmail);
+    const dashboard = await getProviderDashboardData(providerEmail);
     return NextResponse.json({ success: true, dashboard });
   } catch (err) {
     console.error("Dashboard fetch error:", err);

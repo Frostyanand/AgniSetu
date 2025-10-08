@@ -1,8 +1,8 @@
-# AgniSetu API Documentation
+# AgniShakti API Documentation
 
 ## Overview
 
-AgniSetu is a fire detection and alert system that uses AI-powered camera monitoring to detect fires and automatically notify property owners and fire stations. The system consists of a Next.js frontend with API routes and a comprehensive backend service layer.
+AgniShakti is a fire detection and alert system that uses AI-powered camera monitoring to detect fires and automatically notify property owners and fire stations. The system consists of a Next.js frontend with API routes and a comprehensive backend service layer.
 
 ## Tech Stack
 
@@ -16,6 +16,8 @@ AgniSetu is a fire detection and alert system that uses AI-powered camera monito
 - **Language**: JavaScript/Node.js
 
 ## Environment Variables Required
+
+All environment variables are configured in `.env.local` file in the main project directory:
 
 ```env
 # Firebase Configuration
@@ -40,7 +42,16 @@ EMAIL_FROM=your_from_email
 # Security
 SERVICE_KEY=your_service_key_for_python_backend
 PROVIDER_SECRET=your_provider_secret_key
+
+# Python AI Service Configuration
+PYTHON_SERVICE_URL=http://127.0.0.1:8000
+NEXTJS_API_URL=http://localhost:3000/api/alerts/trigger
+DEFAULT_CAMERA_ID=your_default_camera_id
 ```
+
+**Note**: For the Python service to access these environment variables:
+1. Install `python-dotenv`: `pip install python-dotenv`
+2. Create a `.env` file in `src/ai_backend/` directory with the same values, or set them as system environment variables.
 
 ## Database Collections
 
@@ -485,11 +496,19 @@ PROVIDER_SECRET=your_provider_secret_key
 #### POST `/api/alerts/trigger`
 **Description**: Trigger a fire detection alert (typically called by Python AI service).
 
+**Headers**:
+```
+x-service-key: your_service_key
+```
+
 **Request Body**:
 ```json
 {
   "cameraId": "camera_id",
-  "detectionImage": "base64_image_data"
+  "imageId": "unique_image_filename.jpg",
+  "className": "fire",
+  "confidence": 0.95,
+  "bbox": [x1, y1, x2, y2]
 }
 ```
 
@@ -512,19 +531,20 @@ PROVIDER_SECRET=your_provider_secret_key
 }
 ```
 
-**Backend Function**: `triggerAlert(cameraId, detectionImage)`
-**Note**: The actual implementation calls `triggerAlert` with two parameters, but the backend function expects a full payload object. This is a discrepancy that should be fixed.
+**Backend Function**: `triggerAlert(payload)`
+**Note**: The payload now expects `imageId` instead of `snapshotBase64` for the new file-based approach.
 - **Complex workflow**:
   1. Validates service key for security
   2. Retrieves camera and associated house data
   3. Creates alert document with PENDING status
-  4. Uploads detection image to Firebase Storage
-  5. Runs Gemini AI verification
-  6. If fire confirmed: finds owner and nearest fire station
+  4. Constructs image URL pointing to Python service using `imageId`
+  5. Runs verification (currently bypassed - always returns fire detected)
+  6. Finds owner and nearest fire station
   7. Sends email notifications to owner and fire station
   8. Updates alert status to NOTIFIED
 - **Email notifications** include GPS links and detection images
 - **Privacy protection**: Skips image attachment if flagged as sensitive
+- **File-based approach**: Images are stored locally on Python service and served via URL
 
 ---
 
@@ -553,9 +573,9 @@ PROVIDER_SECRET=your_provider_secret_key
 ```
 
 **Backend Function**: `verifyWithGemini({ imageUrl })`
-- Uses Google Gemini AI to analyze image
-- Returns fire detection confidence and sensitive content check
-- Falls back to default values if Gemini is disabled or fails
+- **Currently bypassed**: Always returns true (fire detected) to skip AI verification
+- Returns consistent response: `isFire: true, score: 0.95`
+- Can be re-enabled by restoring original Gemini integration code
 
 ---
 
@@ -579,6 +599,24 @@ PROVIDER_SECRET=your_provider_secret_key
 **Backend Function**: `cancelAlert({ alertId, canceledByEmail, note })`
 - Updates alert status to CANCELLED
 - Records cancellation details and timestamp
+
+---
+
+#### GET `/api/snapshots/[imageId]`
+**Description**: Serve detection images by their unique ID (proxy to Python service).
+
+**URL Parameters**:
+- `imageId`: Unique image filename (e.g., "uuid.jpg")
+
+**Response**: 
+- **Success**: Image file (JPEG)
+- **404**: Image not found
+- **500**: Internal server error
+
+**Backend Function**: None (direct proxy to Python service)
+- Fetches image from Python service at `/snapshots/{imageId}`
+- Returns image with proper caching headers
+- Provides fallback access if direct Python service access is not available
 
 ---
 
@@ -771,32 +809,99 @@ Common HTTP status codes:
 
 ## Issues Found and Recommendations
 
-### **Critical Issues to Fix**
+### **Recent Updates and Fixes**
 
-1. **Alert Trigger Endpoint Mismatch**:
-   - **Issue**: `/api/alerts/trigger` calls `triggerAlert(cameraId, detectionImage)` but backend expects `triggerAlert(payload)`
-   - **Fix**: Update the endpoint to pass the full payload object with serviceKey, className, confidence, etc.
+1. **Alert Trigger Endpoint Updated**:
+   - **Fixed**: Updated `/api/alerts/trigger` to use new file-based approach with `imageId` instead of `snapshotBase64`
+   - **Improvement**: More efficient memory usage and faster processing
 
-2. **House Delete Endpoint**:
+2. **File-Based Image Storage**:
+   - **Added**: Python service now saves detection images locally and serves them via `/snapshots/{imageId}` endpoint
+   - **Added**: Next.js proxy endpoint `/api/snapshots/[imageId]` for fallback access
+   - **Benefit**: Reduced memory usage and improved performance
+
+3. **Environment Configuration**:
+   - **Consolidated**: All environment variables now use the single `.env.local` file
+   - **Added**: `PYTHON_SERVICE_URL` and `NEXTJS_API_URL` for service communication
+   - **Simplified**: Removed separate environment files for easier management
+
+### **Remaining Issues to Fix**
+
+1. **House Delete Endpoint**:
    - **Issue**: `/api/houses/[id]` DELETE endpoint doesn't actually delete houses
    - **Fix**: Implement `deleteHouse(houseId)` function in backend.js
-
-3. **Missing Service Key in Alert Trigger**:
-   - **Issue**: Alert trigger endpoint doesn't include required serviceKey for Python backend authentication
-   - **Fix**: Update endpoint to include serviceKey in request body
 
 ### **Missing Backend Functions**
 - `deleteHouse(houseId)` - needed for house deletion
 - `getActiveAlertsForOwner(ownerEmail)` - exists in backend but no API endpoint
 
 ### **API Endpoint Count**
-- **Total Endpoints**: 16
+- **Total Endpoints**: 17
 - **Authentication**: 2 endpoints
 - **House Management**: 5 endpoints  
 - **Camera Management**: 3 endpoints
 - **Monitoring Control**: 2 endpoints
-- **Alert Management**: 3 endpoints
+- **Alert Management**: 4 endpoints (including new snapshots endpoint)
 - **Provider/Fire Station**: 2 endpoints
 - **System**: 1 endpoint
 
-This documentation provides a comprehensive overview of the AgniSetu API system, including all endpoints, backend functions, database structure, and integration requirements.
+## Python AI Service Endpoints
+
+### Video Upload and Streaming
+
+#### POST `/upload_video`
+**Description**: Upload a video file for general processing.
+
+**Request**: Multipart form data with video file
+**Response**: 
+```json
+{
+  "filename": "uuid_filename.mp4"
+}
+```
+
+#### POST `/upload_video/{camera_id}`
+**Description**: Upload a video file for a specific camera (for demo/testing).
+
+**URL Parameters**:
+- `camera_id`: Valid camera ID from Firestore
+
+**Request**: Multipart form data with video file
+**Response**: 
+```json
+{
+  "filename": "camera_id_uuid_filename.mp4",
+  "camera_id": "t3P2IfoxeOvQv4K9d3eI",
+  "original_filename": "fire-video.mp4",
+  "uploaded_at": null
+}
+```
+
+#### GET `/video_feed/{video_name}`
+**Description**: Stream processed video with fire detection.
+
+**URL Parameters**:
+- `video_name`: Filename returned from upload
+
+**Response**: Video stream with fire detection overlays
+
+#### GET `/video_feed/{camera_id}/{video_name}`
+**Description**: Stream processed video for a specific camera (for demo/testing).
+
+**URL Parameters**:
+- `camera_id`: Valid camera ID from Firestore
+- `video_name`: Filename returned from camera-specific upload
+
+**Response**: Video stream with fire detection overlays and proper camera association
+
+#### GET `/snapshots/{image_id}`
+**Description**: Serve saved detection images by their unique ID.
+
+**URL Parameters**:
+- `image_id`: Unique image filename (e.g., "uuid.jpg")
+
+**Response**: Image file (JPEG) or 404 if not found
+
+---
+
+This documentation provides a comprehensive overview of the AgniShakti API system, including all endpoints, backend functions, database structure, and integration requirements.

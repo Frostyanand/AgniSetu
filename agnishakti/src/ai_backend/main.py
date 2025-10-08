@@ -7,10 +7,10 @@ TEST_MODE = "video"   # ▶ Replace VIDEO_PATH below with your file
 # TEST_MODE = "webcam"   # ▶ Use webcam for testing
 
 # 🎥 If using video mode, set the path here:
-VIDEO_PATH = r"D:\AGNISETU\AgniSetu\Firefighter s Raw POV.mp4"   # <<--- REPLACE THIS PATH
+VIDEO_PATH = r"D:\AgniShakti\AgniShakti\Firefighter s Raw POV.mp4"   # <<--- REPLACE THIS PATH
 
 # Path to your trained YOLOv8 model:
-MODEL_PATH = r"D:\AGNISETU\AgniSetu\best.pt"
+MODEL_PATH = r"D:\AgniShakti\AgniShakti\best.pt"
 # ================================
 
 import torch

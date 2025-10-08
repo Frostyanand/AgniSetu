@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-// Use the default export which contains all functions
-import backend from "@/app/backend"; 
+import { triggerAlert } from "@/app/backend"; 
 
 // POST /api/alerts/trigger
 export async function POST(req) {
@@ -17,26 +16,25 @@ export async function POST(req) {
 
     // Get the full payload from the request body
     const body = await req.json();
-    const { cameraId, snapshotBase64, className, confidence } = body;
+    const { cameraId, imageId, className, confidence, bbox, timestamp } = body;
 
-    if (!cameraId || !snapshotBase64 || !className) {
-      return NextResponse.json({ error: "Missing required fields: cameraId, snapshotBase64, className" }, { status: 400 });
+    if (!cameraId || !imageId || !className) {
+      return NextResponse.json({ error: "Missing required fields: cameraId, imageId, className" }, { status: 400 });
     }
 
     // Construct the payload object that the backend function expects
     const payload = {
       serviceKey,
       cameraId,
-      snapshotBase64,
+      imageId,
       className,
       confidence: confidence || 0, // Default confidence to 0 if not provided
-      // You can add other fields like bbox or timestamp here if needed
-      // bbox: body.bbox,
-      // timestamp: body.timestamp
+      bbox: bbox || null,
+      timestamp: timestamp || null
     };
     
     // Call the backend function with the single payload object
-    const alert = await backend.triggerAlert(payload);
+    const alert = await triggerAlert(payload);
     
     return NextResponse.json({ success: true, alert });
   } catch (err) {

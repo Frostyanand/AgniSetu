@@ -1,7 +1,7 @@
 // Corrected code for /api/houses/[id]/route.js
 
 import { NextResponse } from "next/server";
-import backend from "@/app/backend";
+import { getHouseById, updateHouse, deleteHouse } from "@/app/backend";
 
 // GET /api/houses/[id] -> Get a single house by its ID
 export async function GET(req, { params }) {
@@ -12,7 +12,7 @@ export async function GET(req, { params }) {
     if (!houseId) {
       return NextResponse.json({ error: "House ID is required" }, { status: 400 });
     }
-    const house = await backend.getHouseById(houseId);
+    const house = await getHouseById(houseId);
     if (!house) {
       return NextResponse.json({ error: "House not found" }, { status: 404 });
     }
@@ -31,7 +31,7 @@ export async function PATCH(req, { params }) {
     if (!houseId) {
       return NextResponse.json({ error: "House ID is required" }, { status: 400 });
     }
-    const result = await backend.updateHouse(houseId, updates);
+    const result = await updateHouse(houseId, updates);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -46,7 +46,7 @@ export async function DELETE(req, { params }) {
         }
         
         // Actually call the backend function to delete the house
-        await backend.deleteHouse(houseId); 
+        await deleteHouse(houseId); 
         
         return NextResponse.json({ success: true, message: `House ${houseId} was deleted.` });
     } catch (err) {
