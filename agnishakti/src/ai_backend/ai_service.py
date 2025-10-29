@@ -5,6 +5,8 @@ import shutil
 import uuid
 import requests
 import base64
+import time
+from typing import Dict
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
@@ -24,6 +26,10 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Create a directory to store detection snapshots
 SNAPSHOT_DIR = "saved_snapshots"
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+# Snapshot throttle configuration (per camera)
+SNAPSHOT_THROTTLE_SECONDS = 5
+_last_snapshot_epoch_by_camera: Dict[str, float] = {}
 
 # Model setup
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -78,7 +84,8 @@ def infer_and_draw(frame, camera_id=None):
                 })
                 
                 # Send alert to backend with camera ID
-                send_alert_to_backend(frame, name, conf, [x1, y1, x2, y2], camera_id)
+                if _should_send_snapshot(camera_id):
+                    send_alert_to_backend(frame, name, conf, [x1, y1, x2, y2], camera_id)
 
     return frame
 
@@ -130,6 +137,18 @@ def send_alert_to_backend(frame, className, confidence, bbox, camera_id=None):
             
     except Exception as e:
         print(f"[ALERT] Error sending alert: {e}")
+
+def _should_send_snapshot(camera_id: str | None) -> bool:
+    """Return True if enough time has elapsed since the last snapshot for this camera.
+    Updates the last snapshot timestamp when returning True.
+    """
+    safe_camera_id = camera_id or os.getenv("DEFAULT_CAMERA_ID", "default_camera_id")
+    now = time.time()
+    last = _last_snapshot_epoch_by_camera.get(safe_camera_id, 0.0)
+    if now - last >= SNAPSHOT_THROTTLE_SECONDS:
+        _last_snapshot_epoch_by_camera[safe_camera_id] = now
+        return True
+    return False
 
 # # ------------------------------
 # # Core Inference Logic
@@ -204,6 +223,13 @@ def process_video_stream(video_source, camera_id=None):
     finally:
         cap.release()
         print(f"[INFO] Released video source: {video_source}")
+        # Ensure temporary uploaded files are removed after streaming completes
+        try:
+            if isinstance(video_source, str) and os.path.isfile(video_source):
+                os.remove(video_source)
+                print(f"[CLEANUP] Deleted temporary video file: {video_source}")
+        except Exception as e:
+            print(f"[CLEANUP] Failed to delete video file {video_source}: {e}")
 
 
 # ------------------------------
