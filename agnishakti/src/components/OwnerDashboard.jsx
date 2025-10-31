@@ -40,6 +40,151 @@ const VIDEO_PLAYLIST = [
   "https://sample-videos.com/zip/10/mp4/480/SampleVideo_1280x720_1mb.mp4",
 ];
 
+// CameraFeed component for displaying live webcam feed
+const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
+  const videoRef = useRef(null);
+  const [isMonitoring, setIsMonitoring] = useState(camera.isMonitoring || false);
+  const [streamError, setStreamError] = useState(false);
+
+  // Effect to load the video stream
+  useEffect(() => {
+    let stream;
+    const startStream = async () => {
+      if (camera.streamType === 'webcam' && videoRef.current) {
+        try {
+          setStreamError(false);
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: camera.source } }
+          });
+          videoRef.current.srcObject = stream;
+        } catch (err) {
+          console.error("Error starting webcam stream:", err);
+          setStreamError(true);
+        }
+      }
+    };
+    startStream();
+
+    // Cleanup
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [camera.source, camera.streamType]);
+
+  // Handler for Start/Stop monitoring
+  const handleToggleMonitoring = async () => {
+    const newMonitoringStatus = !isMonitoring;
+    const endpoint = newMonitoringStatus ? '/api/monitoring/start' : '/api/monitoring/stop';
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cameraId: camera.cameraId })
+      });
+
+      if (response.ok) {
+        setIsMonitoring(newMonitoringStatus);
+        onToggleMonitoring(); // Tell parent to re-fetch
+      } else {
+        throw new Error('Failed to toggle monitoring');
+      }
+    } catch (err) {
+      console.error('Error toggling monitoring:', err);
+    }
+  };
+
+  // Handler for Delete
+  const handleDelete = async () => {
+    if (!window.confirm("Are you sure you want to delete this camera?")) return;
+
+    try {
+      const response = await fetch('/api/cameras', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cameraId: camera.cameraId })
+      });
+
+      if (response.ok) {
+        onCameraDeleted(); // Tell parent to re-fetch
+      } else {
+        throw new Error('Failed to delete camera');
+      }
+    } catch (err) {
+      console.error('Error deleting camera:', err);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 30 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="p-6 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl hover:bg-white/10 hover:border-white/20 transition-all duration-300 shadow-2xl relative"
+    >
+      {/* Video Feed */}
+      <div className="aspect-video bg-black rounded-xl overflow-hidden mb-4 border border-white/10">
+        {streamError ? (
+          <div className="w-full h-full flex items-center justify-center">
+            <div className="text-center">
+              <Camera className="w-12 h-12 text-red-500 mx-auto mb-2" />
+              <p className="text-red-400 text-sm">Camera access error</p>
+            </div>
+          </div>
+        ) : (
+          <video 
+            ref={videoRef} 
+            autoPlay 
+            muted 
+            playsInline 
+            className="w-full h-full object-cover"
+          />
+        )}
+      </div>
+
+      {/* Action buttons in top-right corner of video */}
+      <div className="absolute top-8 right-8 flex items-center gap-2 z-10">
+        <motion.button
+          whileHover={{ scale: 1.1 }}
+          whileTap={{ scale: 0.9 }}
+          onClick={handleDelete}
+          className="p-2 bg-red-600/80 backdrop-blur-md rounded-full text-white hover:bg-red-700 transition-colors shadow-lg"
+          title="Delete Camera"
+        >
+          <Trash2 className="w-4 h-4" />
+        </motion.button>
+      </div>
+
+      {/* Camera info and controls */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h3 className="text-xl font-bold text-white mb-1">{camera.label}</h3>
+          <div className="flex items-center gap-2">
+            <div className={`w-3 h-3 rounded-full ${isMonitoring ? 'bg-green-400' : 'bg-gray-500'}`} />
+            <span className="text-sm text-gray-400">
+              {isMonitoring ? 'Monitoring' : 'Offline'}
+            </span>
+          </div>
+        </div>
+        
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={handleToggleMonitoring}
+          className={`px-6 py-3 rounded-xl font-semibold transition-all duration-300 ${
+            isMonitoring
+              ? 'bg-red-500 hover:bg-red-600 text-white'
+              : 'bg-green-500 hover:bg-green-600 text-white'
+          }`}
+        >
+          {isMonitoring ? 'Stop Monitoring' : 'Start Monitoring'}
+        </motion.button>
+      </div>
+    </motion.div>
+  );
+};
+
 const OwnerDashboard = ({ email }) => {
   // User and profile state
   const [user, setUser] = useState(null);
@@ -62,6 +207,7 @@ const OwnerDashboard = ({ email }) => {
   const [cameras, setCameras] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [activeStreams, setActiveStreams] = useState({});
+  const [videoDevices, setVideoDevices] = useState([]);
 
   // Form states
   const [houseForm, setHouseForm] = useState({
@@ -99,6 +245,50 @@ const OwnerDashboard = ({ email }) => {
       return housesArray;
     } catch (err) {
       console.error('Failed to fetch houses:', err);
+      throw err;
+    }
+  };
+
+  // Function to load available video devices (webcams)
+  const loadVideoDevices = async () => {
+    try {
+      // Request permission first
+      await navigator.mediaDevices.getUserMedia({ video: true });
+      
+      // Get all devices
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter(device => device.kind === 'videoinput');
+      
+      setVideoDevices(videoInputs);
+      console.log('Video devices loaded:', videoInputs);
+    } catch (err) {
+      console.error("Error loading video devices:", err);
+      showToast('Unable to access camera. Please grant camera permissions.');
+    }
+  };
+
+  // Function to fetch cameras for the current user
+  const fetchCameras = async () => {
+    try {
+      const camerasResponse = await fetch(`/api/cameras?ownerEmail=${email}`);
+      if (!camerasResponse.ok) throw new Error('Failed to fetch cameras');
+      const camerasData = await camerasResponse.json();
+      const camerasArray = camerasData.cameras || [];
+      
+      // Group cameras by houseId for easier lookup
+      const camerasByHouse = camerasArray.reduce((acc, camera) => {
+        const { houseId } = camera;
+        if (!acc[houseId]) {
+          acc[houseId] = [];
+        }
+        acc[houseId].push(camera);
+        return acc;
+      }, {});
+      
+      setCameras(camerasByHouse);
+      console.log('Cameras fetched and grouped:', camerasByHouse);
+    } catch (err) {
+      console.error('Failed to fetch cameras:', err);
       throw err;
     }
   };
@@ -357,100 +547,45 @@ const handleAddCamera = async (e) => {
   if (!selectedHouse) return;
 
   try {
+    // Get values from form
+    const formData = new FormData(e.target);
+    const cameraName = formData.get('cameraName');
+    const deviceId = formData.get('deviceId');
+
+    if (!deviceId) {
+      showToast('Please select a camera device');
+      return;
+    }
+
     const response = await fetch('/api/cameras', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         houseId: selectedHouse.houseId,
-        label: cameraForm.cameraName,
-        source: cameraForm.streamUrl,
-        streamType: 'rtsp'
+        label: cameraName,
+        source: deviceId,
+        streamType: 'webcam'
       })
     });
 
     if (response.ok) {
-    const newCameraData = await response.json();
-    showToast('Camera added successfully!');
-    setModalState(null);
-    setCameraForm({ cameraName: '', streamUrl: '' });
-    // Update the local state by adding the new camera
-    setCameras(prev => {
-        const newCameras = { ...prev };
-        const houseId = selectedHouse.houseId;
-        if (!newCameras[houseId]) {
-            newCameras[houseId] = [];
-        }
-        newCameras[houseId].push(newCameraData.camera);
-        return newCameras;
-    });
-}else {
+      const newCameraData = await response.json();
+      showToast('Camera added successfully!');
+      setModalState(null);
+      setCameraForm({ cameraName: '', streamUrl: '' });
+      
+      // Re-fetch cameras to get the updated list
+      await fetchCameras();
+    } else {
       throw new Error('Failed to add camera');
     }
   } catch (err) {
+    console.error('Error adding camera:', err);
     setError(err.message);
+    showToast('Failed to add camera. Please try again.');
   }
 };
 
-  // Delete camera
-  const handleDeleteCamera = async (cameraId) => {
-  try {
-    const response = await fetch('/api/cameras', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cameraId })
-    });
-
-    if (response.ok) {
-      showToast('Camera deleted successfully!');
-      // Update the local state to remove the deleted camera
-      setCameras(prev => {
-        const newCameras = { ...prev };
-        // Filter out the deleted camera from the appropriate house's camera list
-        if (newCameras[selectedHouse.houseId]) {
-          newCameras[selectedHouse.houseId] = newCameras[selectedHouse.houseId].filter(
-            (camera) => camera.cameraId !== cameraId
-          );
-        }
-        return newCameras;
-      });
-    } else {
-      throw new Error('Failed to delete camera');
-    }
-  } catch (err) {
-    setError(err.message);
-  }
-};
-const toggleCameraMonitoring = async (cameraId, currentStatus) => {
-  try {
-    const endpoint = currentStatus ? '/api/monitoring/stop' : '/api/monitoring/start';
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cameraId })
-    });
-
-    if (response.ok) {
-      showToast(`Monitoring ${currentStatus ? 'stopped' : 'started'} successfully!`);
-      // Update the local state to reflect the change
-      setCameras(prev => {
-        const newCameras = { ...prev };
-        if (newCameras[selectedHouse.houseId]) {
-          newCameras[selectedHouse.houseId] = newCameras[selectedHouse.houseId].map(
-            (camera) => 
-              camera.cameraId === cameraId 
-                ? { ...camera, isMonitoring: !currentStatus } 
-                : camera
-          );
-        }
-        return newCameras;
-      });
-    } else {
-      throw new Error('Failed to toggle monitoring');
-    }
-  } catch (err) {
-    setError(err.message);
-  }
-};
   // Demo: Use webcam
   const startWebcamDemo = () => {
     setDemoStream('http://localhost:8000/webcam_feed');
@@ -821,7 +956,10 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
                 
                 <motion.button
                   whileHover={{ scale: 1.05 }}
-                  onClick={() => setModalState('add-camera')}
+                  onClick={() => {
+                    loadVideoDevices();
+                    setModalState('add-camera');
+                  }}
                   className="px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-xl font-semibold hover:from-green-600 hover:to-emerald-700 transition-all duration-300 flex items-center gap-2"
                 >
                   <Plus className="w-5 h-5" />
@@ -841,87 +979,24 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
                   <h3 className="text-2xl font-bold text-white mb-4">No Cameras Added</h3>
                   <p className="text-gray-400 mb-8">Add your first camera to start monitoring this property</p>
                   <button
-                    onClick={() => setModalState('add-camera')}
+                    onClick={() => {
+                      loadVideoDevices();
+                      setModalState('add-camera');
+                    }}
                     className="px-8 py-4 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-xl font-semibold hover:from-green-600 hover:to-emerald-700 transition-all duration-300"
                   >
                     Add Your First Camera
                   </button>
                 </motion.div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {cameras[selectedHouse.houseId]?.map((camera, index) => (
-                    <motion.div
-                      key={camera.cameraId || camera.cameraId}
-                      initial={{ opacity: 0, y: 30 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: index * 0.1 }}
-                      className="p-6 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl hover:bg-white/10 hover:border-white/20 transition-all duration-300 shadow-2xl"
-                    >
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="w-14 h-14 bg-gradient-to-r from-green-400 to-blue-500 rounded-2xl flex items-center justify-center">
-                          <Camera className="w-7 h-7 text-white" />
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <motion.button
-                            whileHover={{ scale: 1.1 }}
-                            onClick={() => toggleCameraMonitoring(camera.cameraId, camera.isMonitoring)}
-                            className={`p-2 rounded-lg transition-colors ${
-                              camera.isMonitoring 
-                                ? 'bg-green-500/20 text-green-400' 
-                                : 'bg-gray-500/20 text-gray-400'
-                            }`}
-                          >
-                            {camera.isMonitoring ? <Power className="w-4 h-4" /> : <PowerOff className="w-4 h-4" />}
-                          </motion.button>
-                          <motion.button
-                            whileHover={{ scale: 1.1 }}
-                            onClick={() => handleDeleteCamera(camera.cameraId)}
-                            className="p-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </motion.button>
-                        </div>
-                      </div>
-                      
-                      <h3 className="text-xl font-bold text-white mb-2">{camera.cameraName}</h3>
-                      <p className="text-gray-400 text-sm mb-4">{camera.streamUrl}</p>
-                      
-                      <div className="aspect-video bg-black/50 rounded-xl flex items-center justify-center border border-white/10 mb-4 overflow-hidden">
-                        {activeStreams[camera.cameraId] ? (
-                          <img 
-                            src={camera.streamUrl} 
-                            alt={camera.cameraName}
-                            className="w-full h-full object-cover rounded-xl"
-                          />
-                        ) : (
-                          <div className="text-center">
-                            <Camera className="w-8 h-8 text-gray-500 mx-auto mb-2" />
-                            <p className="text-gray-400 text-sm">Camera feed</p>
-                          </div>
-                        )}
-                      </div>
-                      
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-3 h-3 rounded-full ${camera.isMonitoring ? 'bg-green-400' : 'bg-gray-500'}`} />
-                          <span className="text-sm text-gray-400">
-                            {camera.isMonitoring ? 'Monitoring' : 'Offline'}
-                          </span>
-                        </div>
-                        
-                        <motion.button
-                          whileHover={{ scale: 1.05 }}
-                          onClick={() => toggleCameraMonitoring(camera.cameraId, camera.isMonitoring)}
-                          className={`px-4 py-2 rounded-lg font-medium transition-all duration-300 ${
-                            camera.isMonitoring 
-                              ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' 
-                              : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-                          }`}
-                        >
-                          {camera.isMonitoring ? 'Stop' : 'Start'}
-                        </motion.button>
-                      </div>
-                    </motion.div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {cameras[selectedHouse.houseId]?.map((camera) => (
+                    <CameraFeed
+                      key={camera.cameraId}
+                      camera={camera}
+                      onCameraDeleted={fetchCameras}
+                      onToggleMonitoring={fetchCameras}
+                    />
                   ))}
                 </div>
               )}
@@ -1071,6 +1146,7 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
                       </label>
                       <input
                         type="text"
+                        name="cameraName"
                         value={cameraForm.cameraName}
                         onChange={(e) => setCameraForm({ ...cameraForm, cameraName: e.target.value })}
                         required
@@ -1081,16 +1157,30 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
 
                     <div>
                       <label className="block text-sm font-medium text-gray-300 mb-2">
-                        Stream URL
+                        Select Webcam
                       </label>
-                      <input
-                        type="url"
-                        value={cameraForm.streamUrl}
-                        onChange={(e) => setCameraForm({ ...cameraForm, streamUrl: e.target.value })}
+                      <select
+                        name="deviceId"
                         required
-                        className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500 transition-all duration-300"
-                        placeholder="rtsp://camera-ip:554/stream"
-                      />
+                        className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                      >
+                        <option value="" className="bg-gray-800">Select a camera</option>
+                        {videoDevices.map(device => (
+                          <option 
+                            key={device.deviceId} 
+                            value={device.deviceId}
+                            className="bg-gray-800"
+                          >
+                            {device.label || `Camera ${device.deviceId.substring(0, 8)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                      <p className="text-blue-300 text-sm">
+                        📹 Select your webcam from the dropdown above. The live feed will be displayed in real-time once added.
+                      </p>
                     </div>
 
                     <motion.button
