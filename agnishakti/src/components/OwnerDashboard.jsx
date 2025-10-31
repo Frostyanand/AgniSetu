@@ -63,8 +63,7 @@ const OwnerDashboard = ({ email }) => {
     address: '',
     latitude: '',
     longitude: '',
-    monitorPassword: '',
-    nearestFireStationId: ''
+    monitorPassword: ''
   });
   const [cameraForm, setCameraForm] = useState({
     cameraName: '',
@@ -226,8 +225,7 @@ const startAlertCountdown = (alertData) => {
             lat: parseFloat(houseForm.latitude), 
             lng: parseFloat(houseForm.longitude) 
           },
-          monitorPassword: houseForm.monitorPassword,
-          nearestFireStationId: houseForm.nearestFireStationId || undefined
+          monitorPassword: houseForm.monitorPassword
         })
       });
 
@@ -235,7 +233,7 @@ const startAlertCountdown = (alertData) => {
     const newHouseData = await response.json();
     setHouses(prev => [...prev, newHouseData.house]); // Assuming response returns the new house object
     setModalState(null);
-    setHouseForm({ address: '', latitude: '', longitude: '', monitorPassword: '', nearestFireStationId: '' });
+    setHouseForm({ address: '', latitude: '', longitude: '', monitorPassword: '' });
     showToast('House added successfully!');
 }else {
         throw new Error('Failed to add house');
@@ -915,17 +913,10 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
                       />
                     </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-300 mb-2">
-                        Nearest Fire Station ID (Optional)
-                      </label>
-                      <input
-                        type="text"
-                        value={houseForm.nearestFireStationId}
-                        onChange={(e) => setHouseForm({ ...houseForm, nearestFireStationId: e.target.value })}
-                        className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all duration-300"
-                        placeholder="station_id_123"
-                      />
+                    <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                      <p className="text-blue-300 text-sm">
+                        ℹ️ The nearest fire station will be automatically assigned based on your property's GPS coordinates.
+                      </p>
                     </div>
 
                     <motion.button

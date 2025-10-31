@@ -17,8 +17,18 @@ const DEFAULT_SNAPSHOT_TTL_SEC = 60 * 60 * 24 * 7; // 7 days signed url expiry
 
 /** Normalize emails used as Firestore doc IDs */
 export function normalizeEmail(email) {
-  if (!email || typeof email !== "string") throw new Error("Invalid email");
-  return email.trim().toLowerCase();
+  if (!email || typeof email !== "string") {
+    throw new Error("Invalid email: must be a non-empty string");
+  }
+  
+  const trimmed = email.trim().toLowerCase();
+  
+  // Basic email validation
+  if (!trimmed.includes('@') || !trimmed.includes('.')) {
+    throw new Error(`Invalid email format: ${email}. Must contain @ and domain`);
+  }
+  
+  return trimmed;
 }
 
 /** Simple Haversine distance (km) */
@@ -124,19 +134,46 @@ export async function verifyWithGemini({ imageUrl }) {
 /**
  * registerUser
  * - Creates or merges a user document where doc ID = normalized email
+ * - Only sets createdAt if user doesn't exist
+ * - Firestore collections are automatically created on first write
  */
 export async function registerUser({ name, email, role = "owner" }) {
-  const safeEmail = normalizeEmail(email);
-  const userRef = db.collection("users").doc(safeEmail);
-  const data = {
-    name: name || "",
-    email: safeEmail,
-    role,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  };
+  try {
+    console.log('registerUser called with:', { name, email, role });
+    const safeEmail = normalizeEmail(email);
+    console.log('Normalized email:', safeEmail);
+    
+    const userRef = db.collection("users").doc(safeEmail);
+    
+    // Check if user already exists
+    console.log('Checking if user exists...');
+    const existingUser = await userRef.get();
+    console.log('User exists:', existingUser.exists);
+    
+    const data = {
+      name: name || "",
+      email: safeEmail,
+      role,
+    };
+    
+    // Only set createdAt if this is a new user
+    if (!existingUser.exists) {
+      data.createdAt = admin.firestore.FieldValue.serverTimestamp();
+      console.log('New user - setting createdAt');
+    } else {
+      console.log('Existing user - preserving createdAt');
+    }
 
-  await userRef.set(data, { merge: true });
-  return { success: true, email: safeEmail };
+    console.log('Writing user data to Firestore...');
+    await userRef.set(data, { merge: true });
+    console.log('User document written successfully');
+    
+    return { success: true, email: safeEmail };
+  } catch (error) {
+    console.error('registerUser failed:', error.message);
+    console.error('Stack:', error.stack);
+    throw error;
+  }
 }
 
 /**
@@ -168,9 +205,10 @@ export async function assignRole(email, role) {
  * - address (string)
  * - coords {lat, lng}
  * - monitorPassword (plaintext) - will be hashed & stored
- * - nearestFireStationId (optional)
+ * - Automatically calculates and assigns nearest fire station
+ * - Creates document in 'houses' collection (auto-created on first write)
  */
-export async function createHouse({ ownerEmail, address, coords, monitorPassword, nearestFireStationId = null }) {
+export async function createHouse({ ownerEmail, address, coords, monitorPassword }) {
   const safeEmail = normalizeEmail(ownerEmail);
   const housesRef = db.collection("houses").doc(); // auto id
   const houseId = housesRef.id;
@@ -178,12 +216,19 @@ export async function createHouse({ ownerEmail, address, coords, monitorPassword
   const salt = bcrypt.genSaltSync(10);
   const passwordHash = monitorPassword ? bcrypt.hashSync(monitorPassword, salt) : null;
 
+  // Automatically find nearest fire station based on house coordinates
+  let nearestFireStationId = null;
+  if (coords && coords.lat && coords.lng) {
+    const nearestStation = await findNearestFireStation(coords);
+    nearestFireStationId = nearestStation ? nearestStation.stationId : null;
+  }
+
   const payload = {
     houseId,
     ownerEmail: safeEmail,
     address: address || "",
     coords: coords || null,
-    nearestFireStationId: nearestFireStationId || null,
+    nearestFireStationId: nearestFireStationId,
     monitoringEnabled: true,
     monitorPasswordHash: passwordHash,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -265,6 +310,7 @@ export async function deleteHouse(houseId) {
  * - label
  * - source (rtsp, local-usb, etc.)
  * - streamType (rtsp|usb|webrtc|other)
+ * - Creates document in 'cameras' collection (auto-created on first write)
  */
 export async function addCamera({ houseId, label, source, streamType = "rtsp" }) {
   if (!houseId) throw new Error("houseId required");
@@ -348,6 +394,7 @@ export async function stopMonitoring(cameraId) {
 /**
  * addFireStation
  * - station: { name, phone, email, coords }
+ * - Creates document in 'fireStations' collection (auto-created on first write)
  */
 export async function addFireStation(station) {
     const ref = db.collection("fireStations").doc();
@@ -365,22 +412,47 @@ export async function addFireStation(station) {
 /**
  * registerFireStation
  * - High-level function that handles the entire provider registration flow.
+ * - Automatically creates user in 'users' collection if they don't exist
+ * - Creates fire station in 'fireStations' collection (auto-created on first write)
+ * - Links station to provider in user's assignedStations array
  */
 export async function registerFireStation({ email, name, stationName, stationAddress, stationPhone, coords }) {
-    await registerUser({ name, email, role: 'provider' });
+    try {
+        console.log('=== registerFireStation called ===');
+        console.log('Input params:', { email, name, stationName, stationAddress, stationPhone, coords });
+        
+        // Create or update user as provider (users collection auto-created on first write)
+        console.log('Step 1: Creating/updating user as provider...');
+        const userResult = await registerUser({ name, email, role: 'provider' });
+        console.log('User created/updated:', userResult);
 
-    const stationData = {
-        name: stationName,
-        address: stationAddress,
-        phone: stationPhone,
-        email: normalizeEmail(email),
-        coords
-    };
-    const { stationId } = await addFireStation(stationData);
+        // Create fire station document (fireStations collection auto-created on first write)
+        console.log('Step 2: Creating fire station document...');
+        const stationData = {
+            name: stationName,
+            address: stationAddress,
+            phone: stationPhone,
+            email: normalizeEmail(email),
+            coords
+        };
+        console.log('Station data:', stationData);
+        const { stationId } = await addFireStation(stationData);
+        console.log('Fire station created with ID:', stationId);
 
-    await assignStationToProvider(email, stationId);
+        // Link station to provider's assignedStations array
+        console.log('Step 3: Linking station to provider...');
+        await assignStationToProvider(email, stationId);
+        console.log('Station linked to provider successfully');
 
-    return { success: true, userEmail: normalizeEmail(email), stationId };
+        const result = { success: true, userEmail: normalizeEmail(email), stationId };
+        console.log('=== registerFireStation completed successfully ===', result);
+        return result;
+    } catch (error) {
+        console.error('=== registerFireStation failed ===');
+        console.error('Error:', error.message);
+        console.error('Stack:', error.stack);
+        throw error;
+    }
 }
 
 /**
@@ -456,6 +528,12 @@ export async function getProviderDashboardData(providerEmail) {
  * Alerts flow (triggered by Python service)
  * -------------------------- */
 
+/**
+ * triggerAlert
+ * - Creates alert document in 'alerts' collection (auto-created on first write)
+ * - Verifies with Gemini AI (currently bypassed)
+ * - Sends email notifications to owner and fire station
+ */
 export async function triggerAlert(payload) {
   const {
     serviceKey,

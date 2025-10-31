@@ -62,7 +62,7 @@
         "header": [{"key": "Content-Type", "value": "application/json"}],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"ownerEmail\": \"anuragsujit2005@gmail.com\",\n  \"address\": \"123 Main Street, Chennai\",\n  \"coords\": {\"lat\": 13.0100, \"lng\": 80.2000},\n  \"monitorPassword\": \"secure_password\",\n  \"nearestFireStationId\": \"station_001\"\n}"
+          "raw": "{\n  \"ownerEmail\": \"anuragsujit2005@gmail.com\",\n  \"address\": \"123 Main Street, Chennai\",\n  \"coords\": {\"lat\": 13.0100, \"lng\": 80.2000},\n  \"monitorPassword\": \"secure_password\"\n}"
         },
         "url": {
           "raw": "http://localhost:3000/api/houses",

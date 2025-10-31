@@ -55,6 +55,10 @@ DEFAULT_CAMERA_ID=your_default_camera_id
 
 ## Database Collections
 
+### Automatic Collection Creation
+
+**Important**: All Firestore collections are automatically created when the first document is written to them. You don't need to manually initialize any collections in Firebase Console. Simply start using the endpoints, and the collections will be created automatically.
+
 ### Users Collection (`users`)
 - **Document ID**: Normalized email address
 - **Fields**:
@@ -62,7 +66,7 @@ DEFAULT_CAMERA_ID=your_default_camera_id
   - `email`: User's email (normalized)
   - `role`: User role (`owner` or `provider`)
   - `assignedStations`: Array of fire station IDs (for providers)
-  - `createdAt`: Server timestamp
+  - `createdAt`: Server timestamp (only set on first creation, preserved on updates)
 
 ### Houses Collection (`houses`)
 - **Document ID**: Auto-generated house ID
@@ -71,7 +75,7 @@ DEFAULT_CAMERA_ID=your_default_camera_id
   - `ownerEmail`: Owner's email (normalized)
   - `address`: Physical address
   - `coords`: `{lat, lng}` coordinates
-  - `nearestFireStationId`: ID of nearest fire station
+  - `nearestFireStationId`: ID of nearest fire station (automatically calculated on creation by comparing house coords to all fire stations)
   - `monitoringEnabled`: Boolean flag
   - `monitorPasswordHash`: Hashed password for monitoring access
   - `createdAt`: Server timestamp
@@ -187,7 +191,7 @@ DEFAULT_CAMERA_ID=your_default_camera_id
 ### House Management Endpoints
 
 #### POST `/api/houses`
-**Description**: Create a new house for a property owner.
+**Description**: Create a new house for a property owner. The nearest fire station is automatically calculated based on GPS coordinates.
 
 **Request Body**:
 ```json
@@ -198,8 +202,7 @@ DEFAULT_CAMERA_ID=your_default_camera_id
     "lat": 40.7128,
     "lng": -74.0060
   },
-  "monitorPassword": "secure_password",
-  "nearestFireStationId": "optional_station_id"
+  "monitorPassword": "secure_password"
 }
 ```
 
@@ -211,9 +214,10 @@ DEFAULT_CAMERA_ID=your_default_camera_id
 }
 ```
 
-**Backend Function**: `createHouse({ ownerEmail, address, coords, monitorPassword, nearestFireStationId })`
+**Backend Function**: `createHouse({ ownerEmail, address, coords, monitorPassword })`
 - Creates new house document in Firestore
 - Hashes monitoring password with bcrypt
+- **Automatically calculates and assigns the nearest fire station** by comparing house coords to all fire stations using the Haversine distance formula
 - Sets default monitoring enabled to true
 - Generates unique house ID
 
@@ -308,7 +312,7 @@ DEFAULT_CAMERA_ID=your_default_camera_id
 ---
 
 #### DELETE `/api/houses/[id]`
-**Description**: Delete a house (currently returns success message but doesn't actually delete).
+**Description**: Delete a house permanently from the system.
 
 **URL Parameters**:
 - `id`: House ID
@@ -321,9 +325,9 @@ DEFAULT_CAMERA_ID=your_default_camera_id
 }
 ```
 
-**Backend Function**: None (placeholder implementation)
-- **Note**: This endpoint currently doesn't actually delete the house
-- You may need to implement `deleteHouse` function in backend.js
+**Backend Function**: `deleteHouse(houseId)`
+- Permanently deletes house document from Firestore
+- Implemented in backend.js
 
 ---
 
@@ -602,6 +606,44 @@ x-service-key: your_service_key
 
 ---
 
+#### GET `/api/alerts/active?ownerEmail=owner@example.com`
+**Description**: Get active alerts for a specific owner (pending, confirmed, or notified alerts only).
+
+**Query Parameters**:
+- `ownerEmail`: Owner's email address
+
+**Response**:
+```json
+{
+  "success": true,
+  "alerts": [
+    {
+      "alertId": "alert_id",
+      "cameraId": "camera_id",
+      "houseId": "house_id",
+      "detectedClass": "fire",
+      "confidence": 0.95,
+      "bbox": [x1, y1, x2, y2],
+      "status": "CONFIRMED",
+      "timestamp": "2024-01-01T00:00:00.000Z",
+      "detectionImage": "http://localhost:8000/snapshots/uuid.jpg",
+      "geminiCheck": {
+        "isFire": true,
+        "score": 0.95,
+        "reason": "Clear fire detected"
+      }
+    }
+  ]
+}
+```
+
+**Backend Function**: `getActiveAlertsForOwner(ownerEmail)`
+- Retrieves all houses owned by the user
+- Queries alerts with status: `PENDING`, `CONFIRMED`, or `NOTIFIED`
+- Uses chunking to handle Firestore `in` query limitations (10 items max)
+
+---
+
 #### GET `/api/snapshots/[imageId]`
 **Description**: Serve detection images by their unique ID (proxy to Python service).
 
@@ -656,10 +698,14 @@ x-provider-secret: your_provider_secret_key
 
 **Backend Function**: `registerFireStation({ email, name, stationName, stationAddress, stationPhone, coords })`
 - **Multi-step process**:
-  1. Registers user with 'provider' role
-  2. Creates fire station document
-  3. Links station to provider account
+  1. **Automatically creates or updates user** with 'provider' role in `users` collection
+     - Checks if user exists first
+     - Preserves `createdAt` timestamp for existing users
+     - Only updates name and role if user already exists
+  2. Creates fire station document in `fireStations` collection
+  3. Links station to provider account via `assignedStations` array
 - **Security**: Requires provider secret key in headers
+- **Usage**: Can be called directly from Postman without pre-creating the user account
 
 ---
 
@@ -729,7 +775,7 @@ x-provider-secret: your_provider_secret_key
 - `assignStationToProvider(providerEmail, stationId)`: Links provider to station
 
 ### House Management
-- `createHouse({ ownerEmail, address, coords, monitorPassword, nearestFireStationId })`: Creates new house
+- `createHouse({ ownerEmail, address, coords, monitorPassword })`: Creates new house and automatically calculates nearest fire station
 - `getHousesByOwnerEmail(ownerEmail)`: Retrieves all houses for owner
 - `getHouseById(houseId)`: Retrieves specific house
 - `updateHouse(houseId, updates)`: Updates house properties
@@ -746,8 +792,8 @@ x-provider-secret: your_provider_secret_key
 - `stopMonitoring(cameraId)`: Disables monitoring
 
 ### Fire Station Management
-- `addFireStation(station)`: Creates new fire station
-- `registerFireStation({ email, name, stationName, stationAddress, stationPhone, coords })`: Complete provider registration
+- `addFireStation(station)`: Creates new fire station in `fireStations` collection (auto-created)
+- `registerFireStation({ email, name, stationName, stationAddress, stationPhone, coords })`: Complete provider registration (automatically creates user if needed)
 - `findNearestFireStation({ lat, lng })`: Finds closest station using Haversine formula
 - `getProviderAssignedStations(providerEmail)`: Gets provider's assigned stations
 - `getProviderDashboardData(providerEmail)`: Gets comprehensive dashboard data
@@ -825,23 +871,24 @@ Common HTTP status codes:
    - **Added**: `PYTHON_SERVICE_URL` and `NEXTJS_API_URL` for service communication
    - **Simplified**: Removed separate environment files for easier management
 
-### **Remaining Issues to Fix**
+### **Recent Updates**
 
-1. **House Delete Endpoint**:
-   - **Issue**: `/api/houses/[id]` DELETE endpoint doesn't actually delete houses
-   - **Fix**: Implement `deleteHouse(houseId)` function in backend.js
+1. **House Delete Endpoint**: ✅ **FIXED**
+   - The `deleteHouse(houseId)` function has been implemented in backend.js
+   - DELETE endpoint now properly deletes house documents from Firestore
 
-### **Missing Backend Functions**
-- `deleteHouse(houseId)` - needed for house deletion
-- `getActiveAlertsForOwner(ownerEmail)` - exists in backend but no API endpoint
+2. **Active Alerts Endpoint**: ✅ **ADDED**
+   - New endpoint: `GET /api/alerts/active?ownerEmail=owner@example.com`
+   - Uses existing `getActiveAlertsForOwner(ownerEmail)` backend function
+   - Returns alerts with status: PENDING, CONFIRMED, or NOTIFIED
 
 ### **API Endpoint Count**
-- **Total Endpoints**: 17
+- **Total Endpoints**: 18
 - **Authentication**: 2 endpoints
 - **House Management**: 5 endpoints  
 - **Camera Management**: 3 endpoints
 - **Monitoring Control**: 2 endpoints
-- **Alert Management**: 4 endpoints (including new snapshots endpoint)
+- **Alert Management**: 5 endpoints (including active alerts and snapshots)
 - **Provider/Fire Station**: 2 endpoints
 - **System**: 1 endpoint
 

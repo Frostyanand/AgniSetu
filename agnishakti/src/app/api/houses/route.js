@@ -3,10 +3,10 @@ import { createHouse, getHousesByOwnerEmail } from "@/app/backend";
 
 export async function POST(req) {
   try {
-    const { ownerEmail, address, coords, monitorPassword, nearestFireStationId } = await req.json();
-    console.log('Houses POST request:', { ownerEmail, address, coords, monitorPassword, nearestFireStationId });
+    const { ownerEmail, address, coords, monitorPassword } = await req.json();
+    console.log('Houses POST request:', { ownerEmail, address, coords, monitorPassword });
     
-    const result = await createHouse({ ownerEmail, address, coords, monitorPassword, nearestFireStationId });
+    const result = await createHouse({ ownerEmail, address, coords, monitorPassword });
     console.log('House created successfully:', result);
     
     return NextResponse.json(result);
