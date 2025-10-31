@@ -43,6 +43,7 @@ const VIDEO_PLAYLIST = [
 // CameraFeed component for displaying live webcam feed
 const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
   const videoRef = useRef(null);
+  const canvasRef = useRef(null); // For grabbing frames for AI analysis
   const [isMonitoring, setIsMonitoring] = useState(camera.isMonitoring || false);
   const [streamError, setStreamError] = useState(false);
 
@@ -72,6 +73,98 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
       }
     };
   }, [camera.source, camera.streamType]);
+
+  // AI Analysis Loop - runs when monitoring is active
+  useEffect(() => {
+    let analysisInterval;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    const runAnalysis = () => {
+      if (!video || !canvas || video.videoWidth === 0) return;
+
+      // 1. Draw video frame to canvas with resolution optimization
+      const MAX_WIDTH = 800; // Set a max width for analysis (reduces data size by ~60%)
+      const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+
+      canvas.width = video.videoWidth * scale;
+      canvas.height = video.videoHeight * scale;
+
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // 2. Get image as JPEG blob
+      canvas.toBlob(async (blob) => {
+        if (!blob) return;
+
+        // 3. Send to Python AI service
+        const formData = new FormData();
+        formData.append('file', blob, 'frame.jpg');
+
+        try {
+          const response = await fetch('http://localhost:8000/analyze_frame', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!response.ok) return;
+
+          const result = await response.json();
+
+          // 4. If fire is found, trigger the main alert immediately!
+          if (result.detection && (result.detection.class === 'fire' || result.detection.class === 'smoke')) {
+            console.warn(`🔥 ${result.detection.class.toUpperCase()} DETECTED! Confidence: ${result.detection.confidence.toFixed(2)}`);
+
+            // Call the client-safe Next.js backend endpoint to create the official alert
+            try {
+              const alertResponse = await fetch('/api/alerts/client-trigger', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  cameraId: camera.cameraId,
+                  imageId: `live_detection_${Date.now()}.jpg`,
+                  className: result.detection.class,
+                  confidence: result.detection.confidence,
+                  bbox: result.detection.bbox,
+                  timestamp: new Date().toISOString()
+                }),
+              });
+
+              if (alertResponse.ok) {
+                console.log('✅ Alert successfully triggered!');
+              } else {
+                console.error('❌ Failed to trigger alert:', await alertResponse.text());
+              }
+            } catch (alertErr) {
+              console.error('❌ Error triggering alert:', alertErr);
+            }
+
+            // Stop monitoring to prevent spamming alerts
+            handleToggleMonitoring();
+          }
+        } catch (err) {
+          console.error("AI Analysis error:", err);
+        }
+      }, 'image/jpeg', 0.8); // 0.8 quality for faster processing
+    };
+
+    if (isMonitoring) {
+      console.log(`🔍 Starting AI monitoring for camera: ${camera.label}`);
+      // Start analysis loop: run 1 time per second (optimized for performance)
+      analysisInterval = setInterval(runAnalysis, 1000);
+    } else {
+      console.log(`⏸️ Stopped AI monitoring for camera: ${camera.label}`);
+    }
+
+    // Cleanup
+    return () => {
+      if (analysisInterval) {
+        clearInterval(analysisInterval);
+      }
+    };
+  }, [isMonitoring, camera.cameraId, camera.label]);
 
   // Handler for Start/Stop monitoring
   const handleToggleMonitoring = async () => {
@@ -124,7 +217,7 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
       className="p-6 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl hover:bg-white/10 hover:border-white/20 transition-all duration-300 shadow-2xl relative"
     >
       {/* Video Feed */}
-      <div className="aspect-video bg-black rounded-xl overflow-hidden mb-4 border border-white/10">
+      <div className="aspect-video bg-black rounded-xl overflow-hidden mb-4 border border-white/10 relative">
         {streamError ? (
           <div className="w-full h-full flex items-center justify-center">
             <div className="text-center">
@@ -133,13 +226,29 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
             </div>
           </div>
         ) : (
-          <video 
-            ref={videoRef} 
-            autoPlay 
-            muted 
-            playsInline 
-            className="w-full h-full object-cover"
-          />
+          <>
+            <video 
+              ref={videoRef} 
+              autoPlay 
+              muted 
+              playsInline 
+              className="w-full h-full object-cover"
+            />
+            {/* Hidden canvas for AI frame capture */}
+            <canvas ref={canvasRef} style={{ display: 'none' }} />
+            
+            {/* AI Monitoring Indicator */}
+            {isMonitoring && (
+              <div className="absolute top-2 left-2 flex items-center gap-2 px-3 py-1 bg-red-600/80 backdrop-blur-md rounded-full">
+                <motion.div
+                  animate={{ scale: [1, 1.2, 1] }}
+                  transition={{ duration: 1, repeat: Infinity }}
+                  className="w-2 h-2 bg-white rounded-full"
+                />
+                <span className="text-white text-xs font-semibold">AI Monitoring</span>
+              </div>
+            )}
+          </>
         )}
       </div>
 

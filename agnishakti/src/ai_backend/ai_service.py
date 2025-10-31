@@ -1,6 +1,7 @@
 import os
 import cv2
 import torch
+import numpy as np
 import shutil
 import uuid
 import requests
@@ -314,3 +315,46 @@ def get_snapshot(image_id: str):
         raise HTTPException(status_code=404, detail="Image not found")
     
     return FileResponse(snapshot_path, media_type="image/jpeg")
+
+@app.post("/analyze_frame")
+async def analyze_frame(file: UploadFile = File(...)):
+    """
+    Analyzes a single video frame for fire or smoke.
+    Accepts a JPEG image as form-data.
+    Returns detection results in JSON format.
+    """
+    try:
+        # Read the image file
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame is None:
+            return JSONResponse(content={"error": "Could not decode image."}, status_code=400)
+
+        # Run the YOLO inference
+        results = model(frame, imgsz=640, verbose=False)
+
+        detections = []
+        for r in results:
+            for box in r.boxes:
+                conf = float(box.conf[0].item())
+                if conf > 0.75:  # Confidence threshold
+                    cls_id = int(box.cls[0].item())
+                    class_name = model.names[cls_id]
+                    if class_name in ['fire', 'smoke']:
+                        detections.append({
+                            "class": class_name,
+                            "confidence": conf,
+                            "bbox": box.xyxy[0].tolist()
+                        })
+
+        # If any fire/smoke was found, return the first one
+        if detections:
+            return JSONResponse(content={"detection": detections[0]})
+        else:
+            return JSONResponse(content={"detection": None})
+
+    except Exception as e:
+        print(f"[ERROR] Frame analysis error: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
