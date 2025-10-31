@@ -31,7 +31,8 @@ import {
   Trash2,
   Edit,
   Save,
-  LogOut
+  LogOut,
+  FilePenLine
 } from 'lucide-react';
 
 // Video playlist for background
@@ -51,6 +52,10 @@ const OwnerDashboard = ({ email }) => {
   const [currentVideoIndex, setCurrentVideoIndex] = useState(0);
   const [isVideoPlaying, setIsVideoPlaying] = useState(true);
   const [isVideoMuted, setIsVideoMuted] = useState(true);
+  
+  // Edit modal state
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [houseToEdit, setHouseToEdit] = useState(null);
 
   // Data state
   const [houses, setHouses] = useState([]);
@@ -82,6 +87,22 @@ const OwnerDashboard = ({ email }) => {
 
   // WebSocket for real-time alerts
   const ws = useRef(null);
+
+  // Reusable function to fetch houses from API
+  const fetchHouses = async () => {
+    try {
+      const housesResponse = await fetch(`/api/houses?ownerEmail=${email}`);
+      if (!housesResponse.ok) throw new Error('Failed to fetch houses');
+      const housesData = await housesResponse.json();
+      const housesArray = housesData.houses || [];
+      setHouses(housesArray);
+      return housesArray;
+    } catch (err) {
+      console.error('Failed to fetch houses:', err);
+      throw err;
+    }
+  };
+
 useEffect(() => {
     // Flag to prevent state updates on unmounted component
     let isMounted = true;
@@ -105,11 +126,7 @@ useEffect(() => {
             if (isMounted) setUser(userData.user);
 
             // 2. Fetch ALL Houses for the owner
-            const housesResponse = await fetch(`/api/houses?ownerEmail=${email}`);
-            if (!housesResponse.ok) throw new Error('Failed to fetch houses');
-            const housesData = await housesResponse.json();
-            const housesArray = housesData.houses || [];
-            if (isMounted) setHouses(housesArray);
+            const housesArray = await fetchHouses();
 
             // 3. Fetch ALL Cameras for the owner
             const camerasResponse = await fetch(`/api/cameras?ownerEmail=${email}`);
@@ -230,16 +247,107 @@ const startAlertCountdown = (alertData) => {
       });
 
       if (response.ok) {
-    const newHouseData = await response.json();
-    setHouses(prev => [...prev, newHouseData.house]); // Assuming response returns the new house object
-    setModalState(null);
-    setHouseForm({ address: '', latitude: '', longitude: '', monitorPassword: '' });
-    showToast('House added successfully!');
-}else {
+        const newHouseData = await response.json();
+        console.log('House created successfully:', newHouseData);
+        
+        // Re-fetch all houses to get the complete list from the database
+        await fetchHouses();
+        
+        setModalState(null);
+        setHouseForm({ address: '', latitude: '', longitude: '', monitorPassword: '' });
+        showToast('House added successfully!');
+      } else {
         throw new Error('Failed to add house');
       }
     } catch (err) {
       setError(err.message);
+    }
+  };
+
+  // Delete house
+  const handleDeleteHouse = async (houseId, e) => {
+    // Stop event propagation to prevent card click
+    if (e) {
+      e.stopPropagation();
+    }
+
+    // Confirmation prompt
+    if (!window.confirm("Are you sure you want to delete this property? This will also delete all associated cameras and cannot be undone.")) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/houses/${houseId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      if (response.ok) {
+        console.log('House deleted successfully:', houseId);
+        
+        // Re-fetch all houses to update the list
+        await fetchHouses();
+        
+        showToast('Property deleted successfully!');
+      } else {
+        throw new Error('Failed to delete property');
+      }
+    } catch (err) {
+      console.error('Error deleting house:', err);
+      setError(err.message);
+      showToast('Failed to delete property. Please try again.');
+    }
+  };
+
+  // Open edit modal
+  const handleOpenEditModal = (house, e) => {
+    // Stop event propagation to prevent card click
+    if (e) {
+      e.stopPropagation();
+    }
+    
+    setHouseToEdit(house);
+    setIsEditModalOpen(true);
+  };
+
+  // Close edit modal
+  const handleCloseEditModal = () => {
+    setIsEditModalOpen(false);
+    setHouseToEdit(null);
+  };
+
+  // Update house
+  const handleUpdateHouse = async (event) => {
+    event.preventDefault();
+    
+    if (!houseToEdit) return;
+
+    try {
+      const newAddress = event.target.address.value;
+
+      const response = await fetch(`/api/houses/${houseToEdit.houseId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: newAddress })
+      });
+
+      if (response.ok) {
+        console.log('House updated successfully:', houseToEdit.houseId);
+        
+        // Re-fetch all houses to update the list
+        await fetchHouses();
+        
+        // Close modal
+        handleCloseEditModal();
+        
+        showToast('Property updated successfully!');
+      } else {
+        throw new Error('Failed to update property');
+      }
+    } catch (err) {
+      console.error('Error updating house:', err);
+      setError(err.message);
+      showToast('Failed to update property. Please try again.');
     }
   };
 
@@ -574,13 +682,38 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
                       transition={{ delay: index * 0.1 }}
                       whileHover={{ y: -5, scale: 1.02 }}
                       onClick={() => setSelectedHouse(house)}
-                      className="cursor-pointer p-6 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl hover:bg-white/10 hover:border-white/20 transition-all duration-300 shadow-2xl"
+                      className="cursor-pointer p-6 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl hover:bg-white/10 hover:border-white/20 transition-all duration-300 shadow-2xl relative"
                     >
+                      {/* Action buttons in top-right corner */}
+                      <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
+                        {/* Edit button */}
+                        <motion.button
+                          whileHover={{ scale: 1.1 }}
+                          whileTap={{ scale: 0.9 }}
+                          onClick={(e) => handleOpenEditModal(house, e)}
+                          className="p-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded-lg transition-colors"
+                          title="Edit Property"
+                        >
+                          <FilePenLine className="w-4 h-4" />
+                        </motion.button>
+                        
+                        {/* Delete button */}
+                        <motion.button
+                          whileHover={{ scale: 1.1 }}
+                          whileTap={{ scale: 0.9 }}
+                          onClick={(e) => handleDeleteHouse(house.houseId, e)}
+                          className="p-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg transition-colors"
+                          title="Delete Property"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </motion.button>
+                      </div>
+
                       <div className="flex items-start justify-between mb-4">
                         <div className="w-14 h-14 bg-gradient-to-r from-blue-400 to-purple-500 rounded-2xl flex items-center justify-center">
                           <Home className="w-7 h-7 text-white" />
                         </div>
-                        <div className="text-right">
+                        <div className="text-right pr-20">
                           <div className="flex items-center gap-1">
                             <Camera className="w-4 h-4 text-gray-400" />
                             <span className="text-sm text-gray-400">
@@ -1078,6 +1211,86 @@ const toggleCameraMonitoring = async (cameraId, currentStatus) => {
           {isVideoPlaying ? <Pause size={24} /> : <Play size={24} />}
         </motion.button>
       </motion.div>
+
+      {/* Edit House Modal */}
+      <AnimatePresence>
+        {isEditModalOpen && houseToEdit && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={handleCloseEditModal}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-lg bg-white/10 backdrop-blur-2xl border border-white/20 rounded-3xl shadow-2xl overflow-hidden"
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-6 border-b border-white/10">
+                <h2 className="text-2xl font-bold text-white">Edit Property</h2>
+                <motion.button
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.9 }}
+                  onClick={handleCloseEditModal}
+                  className="p-2 hover:bg-white/10 rounded-xl transition-colors"
+                >
+                  <X className="w-5 h-5 text-gray-400" />
+                </motion.button>
+              </div>
+
+              {/* Modal Content */}
+              <form onSubmit={handleUpdateHouse} className="p-6">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      Property Address
+                    </label>
+                    <input
+                      type="text"
+                      name="address"
+                      defaultValue={houseToEdit.address}
+                      required
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-300"
+                      placeholder="Enter property address"
+                    />
+                  </div>
+
+                  <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                    <p className="text-blue-300 text-sm">
+                      ℹ️ Note: You can only edit the address. GPS coordinates and other settings cannot be changed here.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-3 pt-4">
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      type="button"
+                      onClick={handleCloseEditModal}
+                      className="flex-1 px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-xl font-semibold transition-all duration-300"
+                    >
+                      Cancel
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      type="submit"
+                      className="flex-1 px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-xl font-semibold transition-all duration-300 flex items-center justify-center gap-2"
+                    >
+                      <Save className="w-5 h-5" />
+                      Save Changes
+                    </motion.button>
+                  </div>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
