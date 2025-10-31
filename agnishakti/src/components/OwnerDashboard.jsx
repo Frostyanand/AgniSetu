@@ -46,6 +46,7 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
   const canvasRef = useRef(null); // For grabbing frames for AI analysis
   const [isMonitoring, setIsMonitoring] = useState(camera.isMonitoring || false);
   const [streamError, setStreamError] = useState(false);
+  const [isAlertPending, setIsAlertPending] = useState(false);
 
   // Effect to load the video stream
   useEffect(() => {
@@ -74,97 +75,96 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
     };
   }, [camera.source, camera.streamType]);
 
-  // AI Analysis Loop - runs when monitoring is active
+  // This effect runs the 1 FPS analysis loop
   useEffect(() => {
     let analysisInterval;
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
     const runAnalysis = () => {
-      if (!video || !canvas || video.videoWidth === 0) return;
+      if (!video || !canvas || video.videoWidth === 0 || video.paused) return;
 
-      // 1. Draw video frame to canvas with resolution optimization
-      const MAX_WIDTH = 800; // Set a max width for analysis (reduces data size by ~60%)
-      const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
-
-      canvas.width = video.videoWidth * scale;
+      // 1. Draw and get blob (Optimized)
+      const MAX_WIDTH = 800;
+      const scale = MAX_WIDTH / video.videoWidth;
+      canvas.width = MAX_WIDTH;
       canvas.height = video.videoHeight * scale;
-
       const ctx = canvas.getContext('2d');
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // 2. Get image as JPEG blob
       canvas.toBlob(async (blob) => {
         if (!blob) return;
 
-        // 3. Send to Python AI service
+        // 2. Send blob to NEW Python endpoint
         const formData = new FormData();
         formData.append('file', blob, 'frame.jpg');
 
         try {
-          const response = await fetch('http://localhost:8000/analyze_frame', {
+          const aiResponse = await fetch('http://localhost:8000/analyze_and_save_frame', {
             method: 'POST',
             body: formData,
           });
 
-          if (!response.ok) return;
+          if (!aiResponse.ok) {
+              console.error("[REACT_FRONTEND] AI server request failed.");
+              return;
+          }
 
-          const result = await response.json();
+          const result = await aiResponse.json();
 
-          // 4. If fire is found, trigger the main alert immediately!
-          if (result.detection && (result.detection.class === 'fire' || result.detection.class === 'smoke')) {
-            console.warn(`🔥 ${result.detection.class.toUpperCase()} DETECTED! Confidence: ${result.detection.confidence.toFixed(2)}`);
+          // 3. Check for detection
+          if (result.detection && result.imageId) {
 
-            // Call the client-safe Next.js backend endpoint to create the official alert
-            try {
-              const alertResponse = await fetch('/api/alerts/client-trigger', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  cameraId: camera.cameraId,
-                  imageId: `live_detection_${Date.now()}.jpg`,
-                  className: result.detection.class,
-                  confidence: result.detection.confidence,
-                  bbox: result.detection.bbox,
-                  timestamp: new Date().toISOString()
-                }),
-              });
-
-              if (alertResponse.ok) {
-                console.log('✅ Alert successfully triggered!');
-              } else {
-                console.error('❌ Failed to trigger alert:', await alertResponse.text());
-              }
-            } catch (alertErr) {
-              console.error('❌ Error triggering alert:', alertErr);
+            // 4. --- SPAM CHECK ---
+            if (isAlertPending) {
+              console.log(`[REACT_FRONTEND] (${camera.label}) ⏳ Alert is already pending. Ignoring new detection.`);
+              return; 
             }
 
-            // Stop monitoring to prevent spamming alerts
+            // --- THIS IS A NEW FIRE! ---
+            console.log(`[REACT_FRONTEND] (${camera.label}) ➡️ NEW FIRE! Triggering alert...`);
+
+            // A. Set spam protection
+            setIsAlertPending(true); 
+
+            // B. Call the *existing* client-trigger with the REAL imageId
+            await fetch('/api/alerts/client-trigger', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                cameraId: camera.cameraId,
+                imageId: result.imageId, // <-- The REAL, VALID imageId from Python
+                className: result.detection.class,
+                confidence: result.detection.confidence,
+                bbox: result.detection.bbox,
+                timestamp: new Date().toISOString(),
+              }),
+            });
+
+            // C. Stop monitoring (this is our current logic, we'll fix it in a later step)
             handleToggleMonitoring();
+
+          } else {
+            // This is a "No fire" frame
+            // We could reset the isAlertPending here if we want, but for now
+            // we'll let it stay true until the page reloads.
           }
         } catch (err) {
-          console.error("AI Analysis error:", err);
+          console.error("[REACT_FRONTEND] Error in analysis loop:", err);
         }
-      }, 'image/jpeg', 0.8); // 0.8 quality for faster processing
-    };
+      }, 'image/jpeg', 0.8);
+    }; // end runAnalysis
 
     if (isMonitoring) {
-      console.log(`🔍 Starting AI monitoring for camera: ${camera.label}`);
-      // Start analysis loop: run 1 time per second (optimized for performance)
-      analysisInterval = setInterval(runAnalysis, 1000);
-    } else {
-      console.log(`⏸️ Stopped AI monitoring for camera: ${camera.label}`);
+      // Run at 1 FPS
+      analysisInterval = setInterval(runAnalysis, 1000); 
     }
 
-    // Cleanup
     return () => {
-      if (analysisInterval) {
-        clearInterval(analysisInterval);
-      }
+      if (analysisInterval) clearInterval(analysisInterval);
     };
-  }, [isMonitoring, camera.cameraId, camera.label]);
+
+  }, [isMonitoring, camera.cameraId, isAlertPending]); // <-- Add isAlertPending to dependency array
 
   // Handler for Start/Stop monitoring
   const handleToggleMonitoring = async () => {

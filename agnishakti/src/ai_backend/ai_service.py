@@ -316,45 +316,77 @@ def get_snapshot(image_id: str):
     
     return FileResponse(snapshot_path, media_type="image/jpeg")
 
-@app.post("/analyze_frame")
-async def analyze_frame(file: UploadFile = File(...)):
+@app.post("/analyze_and_save_frame")
+async def analyze_and_save_frame(file: UploadFile = File(...)):
     """
-    Analyzes a single video frame for fire or smoke.
-    Accepts a JPEG image as form-data.
-    Returns detection results in JSON format.
+    Analyzes a single frame. If fire/smoke is detected, it saves the image
+    to the 'saved_snapshots' dir and returns the new imageId along
+    with the detection data.
     """
     try:
-        # Read the image file
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
+            print("[PYTHON] ❌ Error: Could not decode image.")
             return JSONResponse(content={"error": "Could not decode image."}, status_code=400)
 
-        # Run the YOLO inference
+        # --- START OF VERBOSE LOGGING ---
+        print("\n[PYTHON] ---------------- NEW FRAME ----------------")
+        print("[PYTHON] ✅ Frame received. Running YOLO model...")
+        
         results = model(frame, imgsz=640, verbose=False)
-
-        detections = []
+        
+        best_detection = None
+        
+        # Log *all* detections, even low-confidence ones
+        found_anything = False
         for r in results:
             for box in r.boxes:
                 conf = float(box.conf[0].item())
-                if conf > 0.75:  # Confidence threshold
-                    cls_id = int(box.cls[0].item())
-                    class_name = model.names[cls_id]
-                    if class_name in ['fire', 'smoke']:
-                        detections.append({
+                cls_id = int(box.cls[0].item())
+                class_name = model.names[cls_id]
+                
+                # Log everything the model sees
+                print(f"[PYTHON]   - Found: {class_name} (Confidence: {conf:.2f})")
+                found_anything = True
+                
+                # Now, check if it's our target (0.75 threshold)
+                if class_name in ['fire', 'smoke'] and conf > 0.75:
+                    if best_detection is None: 
+                        best_detection = {
                             "class": class_name,
                             "confidence": conf,
                             "bbox": box.xyxy[0].tolist()
-                        })
-
-        # If any fire/smoke was found, return the first one
-        if detections:
-            return JSONResponse(content={"detection": detections[0]})
+                        }
+        
+        if not found_anything:
+            print("[PYTHON]   - Model found no objects in this frame.")
+        # --- END OF VERBOSE LOGGING ---
+        
+        if best_detection:
+            # Fire IS detected. Save the image.
+            image_id = f"{uuid.uuid4()}.jpg"
+            snapshot_path = os.path.join(SNAPSHOT_DIR, image_id)
+            
+            success = cv2.imwrite(snapshot_path, frame)
+            
+            if success:
+                print(f"[PYTHON] 🔥🔥🔥 SUCCESS! Fire detected! Conf: {best_detection['confidence']:.2f}. Saved as: {image_id}")
+                return JSONResponse(content={
+                    "detection": best_detection,
+                    "imageId": image_id
+                })
+            else:
+                print(f"[PYTHON] ❌ Error: Fire detected, but FAILED to save snapshot.")
+                return JSONResponse(content={"error": "Failed to save snapshot."}, status_code=500)
+        
         else:
-            return JSONResponse(content={"detection": None})
+            # No fire detected that passes the 0.75 threshold.
+            print("[PYTHON] ✅ No fire detected *above 0.75 threshold*. Returning null.")
+            return JSONResponse(content={"detection": None, "imageId": None})
 
     except Exception as e:
-        print(f"[ERROR] Frame analysis error: {e}")
+        print(f"[PYTHON] ❌ CRITICAL ERROR in /analyze_and_save_frame: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
