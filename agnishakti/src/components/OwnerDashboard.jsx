@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Toaster, toast } from 'react-hot-toast';
 import { 
   Shield, 
   Eye, 
@@ -41,12 +42,11 @@ const VIDEO_PLAYLIST = [
 ];
 
 // CameraFeed component for displaying live webcam feed
-const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
+const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring, activeAlert }) => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null); // For grabbing frames for AI analysis
   const [isMonitoring, setIsMonitoring] = useState(camera.isMonitoring || false);
   const [streamError, setStreamError] = useState(false);
-  const [isAlertPending, setIsAlertPending] = useState(false);
 
   // Effect to load the video stream
   useEffect(() => {
@@ -116,18 +116,24 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
           if (result.detection && result.imageId) {
 
             // 4. --- SPAM CHECK ---
-            if (isAlertPending) {
-              console.log(`[REACT_FRONTEND] (${camera.label}) ⏳ Alert is already pending. Ignoring new detection.`);
+            // Check if there's an active alert that should block new detections
+            // Only block if alert is PENDING, CONFIRMED_BY_GEMINI, SENDING_NOTIFICATIONS, or NOTIFIED_COOLDOWN
+            // Don't block if REJECTED_BY_GEMINI or CANCELLED_BY_USER (these are resolved)
+            const shouldBlock = activeAlert && 
+              activeAlert.status !== "REJECTED_BY_GEMINI" && 
+              activeAlert.status !== "CANCELLED_BY_USER";
+            
+            if (shouldBlock) {
+              console.log(`[REACT_FRONTEND] (${camera.label}) ⏳ Alert is already active (status: ${activeAlert.status}). Ignoring new detection.`);
               return; 
             }
 
             // --- THIS IS A NEW FIRE! ---
             console.log(`[REACT_FRONTEND] (${camera.label}) ➡️ NEW FIRE! Triggering alert...`);
 
-            // A. Set spam protection
-            setIsAlertPending(true); 
-
             // B. Call the *existing* client-trigger with the REAL imageId
+            // NOTE: We do NOT stop monitoring - detection should continue to run
+            // so that fake alerts can be shut out again and real fires can still trigger
             await fetch('/api/alerts/client-trigger', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -141,13 +147,8 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
               }),
             });
 
-            // C. Stop monitoring (this is our current logic, we'll fix it in a later step)
-            handleToggleMonitoring();
-
           } else {
-            // This is a "No fire" frame
-            // We could reset the isAlertPending here if we want, but for now
-            // we'll let it stay true until the page reloads.
+            // This is a "No fire" frame - continue monitoring normally
           }
         } catch (err) {
           console.error("[REACT_FRONTEND] Error in analysis loop:", err);
@@ -164,7 +165,7 @@ const CameraFeed = ({ camera, onCameraDeleted, onToggleMonitoring }) => {
       if (analysisInterval) clearInterval(analysisInterval);
     };
 
-  }, [isMonitoring, camera.cameraId, isAlertPending]); // <-- Add isAlertPending to dependency array
+  }, [isMonitoring, camera.cameraId, activeAlert]); // Monitor activeAlert to react to status changes
 
   // Handler for Start/Stop monitoring
   const handleToggleMonitoring = async () => {
@@ -333,7 +334,21 @@ const OwnerDashboard = ({ email }) => {
   // Alert system
   const [activeAlert, setActiveAlert] = useState(null);
   const [alertCountdown, setAlertCountdown] = useState(0);
-  const alertInterval = useRef(null);
+  const alertCountdownInterval = useRef(null);
+  const [allActiveAlerts, setAllActiveAlerts] = useState({});
+  
+  // Refs to access latest values in closures without causing re-renders
+  const userRef = useRef(null);
+  const activeAlertRef = useRef(null);
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+  
+  useEffect(() => {
+    activeAlertRef.current = activeAlert;
+  }, [activeAlert]);
 
   // Demo states
   const [selectedFile, setSelectedFile] = useState(null);
@@ -460,26 +475,106 @@ useEffect(() => {
 
     // Function to poll for alerts
     const pollAlerts = async () => {
-        try {
-            const response = await fetch(`/api/alerts?ownerEmail=${email}`);
-            if (response.ok) {
-                const responseData = await response.json();
-                const currentAlerts = responseData.alerts || [];
+      // Use refs to get latest values without causing re-renders
+      const currentUser = userRef.current;
+      const currentActiveAlert = activeAlertRef.current;
+      const currentUserEmail = currentUser?.email || email;
+      
+      if (!currentUserEmail) return;
 
-                // Check for a new pending/confirmed alert to trigger the modal
-                const latestAlert = currentAlerts.find(alert => alert.status === 'PENDING' || alert.status === 'CONFIRMED');
-                if (latestAlert && !activeAlert) {
-                    startAlertCountdown(latestAlert);
-                }
-                
-                // Update the main alerts state regardless
-                if (isMounted) {
-                    setAlerts(currentAlerts);
-                }
-            }
-        } catch (err) {
-            console.error('Error polling alerts:', err);
+      try {
+        const response = await fetch(`/api/alerts?ownerEmail=${currentUserEmail}`);
+        if (!response.ok) {
+          // If quota exceeded or server error, log but don't crash
+          if (response.status === 500 || response.status === 429) {
+            console.warn(`[REACT_FRONTEND] Poll: Failed to fetch alerts (status ${response.status}). Will retry on next poll.`);
+          }
+          return;
         }
+
+        const responseData = await response.json();
+        const currentAlerts = responseData.alerts || [];
+
+        // Find the "main" active alert (the one we're showing a modal for)
+        const mainAlertId = currentActiveAlert ? currentActiveAlert.alertId : null;
+        const mainAlertUpdated = currentAlerts.find(a => a.alertId === mainAlertId);
+
+        // --- NEW Smart UI Logic ---
+        if (mainAlertUpdated) {
+          // We are ALREADY showing a modal. Let's check its status.
+          const newStatus = mainAlertUpdated.status;
+
+          if (newStatus === "REJECTED_BY_GEMINI") {
+            // Gemini rejected it! Close the modal and show a toast.
+            console.log(`[REACT_FRONTEND] Poll: Gemini REJECTED alert ${mainAlertUpdated.alertId}.`);
+            toast.error(`False Alarm: Gemini verification failed. Reason: ${mainAlertUpdated.geminiCheck?.reason || 'Unknown reason'}`);
+            clearInterval(alertCountdownInterval.current); // Stop the timer
+            setActiveAlert(null); // Close the modal
+            setAlertCountdown(0);
+
+          } else if (newStatus === "CONFIRMED_BY_GEMINI") {
+            // Gemini confirmed! Show a success toast.
+            if (currentActiveAlert?.status !== "CONFIRMED_BY_GEMINI") { // Only show once
+              console.log(`[REACT_FRONTEND] Poll: Gemini CONFIRMED alert ${mainAlertUpdated.alertId}.`);
+              toast.success(`Gemini Verified: This is a real fire. Confirming action...`);
+            }
+            setActiveAlert(mainAlertUpdated); // Update the alert state
+
+          } else if (newStatus === "NOTIFIED_COOLDOWN" || newStatus === "CANCELLED_BY_USER") {
+            // The alert is finished (either sent or cancelled). Close the modal.
+            console.log(`[REACT_FRONTEND] Poll: Alert ${mainAlertUpdated.alertId} is now ${newStatus}. Closing modal.`);
+            clearInterval(alertCountdownInterval.current);
+            setActiveAlert(null);
+            setAlertCountdown(0);
+          }
+          // If status is "PENDING", we just let the timer run.
+
+        } else {
+          // We are NOT showing a modal. Check if we *should* show one.
+          // Use ref to check if we already have an active alert to prevent duplicates
+          const newPendingAlert = currentAlerts.find(a => 
+            (a.status === 'PENDING' || a.status === 'CONFIRMED_BY_GEMINI') && 
+            (!currentActiveAlert || currentActiveAlert.alertId !== a.alertId)
+          );
+
+          if (newPendingAlert) {
+            // A new alert just appeared! Start the countdown.
+            console.log(`[REACT_FRONTEND] Poll: NEW alert found: ${newPendingAlert.alertId}. Starting 30s modal.`);
+            startAlertCountdown(newPendingAlert);
+            if (newPendingAlert.status === 'PENDING') {
+              toast.loading("Verifying with Gemini AI...", { duration: 5000 });
+            }
+          }
+        }
+        // --- End of new logic ---
+
+        // Update the main alerts map for the CameraFeed components
+        // Prioritize active alerts over rejected/cancelled ones
+        const alertsByCamera = {};
+        currentAlerts.forEach(alert => {
+          const existing = alertsByCamera[alert.cameraId];
+          if (!existing) {
+            alertsByCamera[alert.cameraId] = alert;
+          } else {
+            // Priority: active statuses > rejected/cancelled
+            const isActive = ["PENDING", "CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"].includes(alert.status);
+            const existingIsActive = ["PENDING", "CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"].includes(existing.status);
+            if (isActive && !existingIsActive) {
+              alertsByCamera[alert.cameraId] = alert; // Replace with active alert
+            }
+            // Otherwise keep existing (either both active or existing is active)
+          }
+        });
+        setAllActiveAlerts(alertsByCamera);
+
+        // Also update the alerts array
+        if (isMounted) {
+          setAlerts(currentAlerts);
+        }
+
+      } catch (err) {
+        console.error('Error polling alerts:', err);
+      }
     };
     
     // Initial data fetch and start polling
@@ -490,11 +585,11 @@ useEffect(() => {
     return () => {
         isMounted = false;
         clearInterval(pollingInterval);
-        if (alertInterval.current) {
-            clearInterval(alertInterval.current);
+        if (alertCountdownInterval.current) {
+            clearInterval(alertCountdownInterval.current);
         }
     };
-}, [email, activeAlert]); // **Important**: Add activeAlert to dependencies
+}, [email]); // Only depend on email - user and activeAlert are accessed via closure in pollAlerts
 
 const startAlertCountdown = (alertData) => {
     if (activeAlert) return; // Prevents multiple alerts from being active at once
@@ -502,16 +597,21 @@ const startAlertCountdown = (alertData) => {
     setActiveAlert(alertData);
     setAlertCountdown(30);
 
-    if (alertInterval.current) clearInterval(alertInterval.current);
+    if (alertCountdownInterval.current) clearInterval(alertCountdownInterval.current);
     
-    alertInterval.current = setInterval(() => {
+    alertCountdownInterval.current = setInterval(async () => {
         setAlertCountdown(prev => {
             if (prev <= 1) {
                 // The timer expired, the alert is considered confirmed.
-                // The backend already handled the notification, so the frontend's job is done.
-                clearInterval(alertInterval.current);
+                clearInterval(alertCountdownInterval.current);
                 setActiveAlert(null);
-                showToast('Emergency services have been notified!');
+                // Call the "Email Gatekeeper"
+                fetch('/api/alerts/confirm-and-send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ alertId: alertData.alertId })
+                }).catch(err => console.error('[REACT_FRONTEND] Error confirming alert:', err));
+                toast.success('Emergency services have been notified!');
                 return 0;
             }
             return prev - 1;
@@ -519,12 +619,51 @@ const startAlertCountdown = (alertData) => {
     }, 1000);
 };
   // Cancel active alert
-  const cancelAlert = () => {
-    if (alertInterval.current) {
-      clearInterval(alertInterval.current);
+  const handleCancelAlert = async () => {
+    if (!activeAlert) return; 
+
+    const alertIdToCancel = activeAlert.alertId;
+    const userEmail = user?.email || email || "unknown.user@example.com";
+
+    console.log(`[REACT_FRONTEND] 🚫 User clicked CANCEL for Alert: ${alertIdToCancel}`);
+
+    // Stop the 30s timer
+    if (alertCountdownInterval.current) {
+      clearInterval(alertCountdownInterval.current);
     }
+
+    // --- Optimistic UI Update ---
+    // Close the modal and show toast *immediately*
+    // Don't wait for the API call to finish
     setActiveAlert(null);
     setAlertCountdown(0);
+    toast.success("Alert Cancelled.");
+
+    // Set a "fake" cancelled state so the poll doesn't re-trigger the modal
+    setAllActiveAlerts(prev => ({
+      ...prev,
+      [activeAlert.cameraId]: { ...activeAlert, status: "CANCELLED_BY_USER" }
+    }));
+
+    // Call the backend in the background
+    try {
+      await fetch('/api/alerts/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          alertId: alertIdToCancel,
+          userEmail: userEmail
+        })
+      });
+      console.log(`[REACT_FRONTEND] 🚫 Alert ${alertIdToCancel} successfully cancelled on backend.`);
+
+      // The 5s poll will eventually get the "final" state,
+      // but the UI is already (and correctly) updated.
+
+    } catch (err) {
+      console.error(`[REACT_FRONTEND] ❌ Error cancelling alert:`, err);
+      toast.error("Error cancelling alert. Please check console.");
+    }
   };
 
   // Add new house
@@ -695,38 +834,60 @@ const handleAddCamera = async (e) => {
   }
 };
 
-  // Demo: Use webcam
+  // Demo: Use webcam - assign to first available camera for demo purposes
   const startWebcamDemo = () => {
-    setDemoStream('http://localhost:8000/webcam_feed');
-    showToast('Webcam demo started!');
+    // Get first available camera to use its credentials
+    const allCamerasList = Object.values(cameras).flat();
+    if (allCamerasList.length === 0) {
+      showToast('Please add a camera first to enable demo mode!');
+      return;
+    }
+    
+    const demoCamera = allCamerasList[0];
+    console.log(`[DEMO] Using camera ${demoCamera.cameraId} (${demoCamera.label}) for webcam demo`);
+    setDemoStream(`http://localhost:8000/webcam_feed/${demoCamera.cameraId}`);
+    showToast(`Webcam demo started using camera: ${demoCamera.label}!`);
   };
 
-  // Demo: Upload video
+  // Demo: Upload video - assign to first available camera for demo purposes
   const handleVideoUpload = async () => {
     if (!selectedFile) {
       setError('Please select a video file first!');
       return;
     }
 
+    // Get first available camera to use its credentials
+    const allCamerasList = Object.values(cameras).flat();
+    if (allCamerasList.length === 0) {
+      setError('Please add a camera first to enable demo mode!');
+      return;
+    }
+
+    const demoCamera = allCamerasList[0];
+    console.log(`[DEMO] Using camera ${demoCamera.cameraId} (${demoCamera.label}) for video demo`);
+
     setIsProcessing(true);
     const formData = new FormData();
     formData.append('video', selectedFile);
 
     try {
-      const response = await fetch('http://localhost:8000/upload_video', {
+      // Use the camera-specific upload endpoint
+      const response = await fetch(`http://localhost:8000/upload_video/${demoCamera.cameraId}`, {
         method: 'POST',
         body: formData
       });
 
       if (response.ok) {
         const data = await response.json();
-        setDemoStream(`http://localhost:8000/video_feed/${data.filename}`);
-        showToast('Video processing started!');
+        // Use the camera-specific video feed endpoint
+        setDemoStream(`http://localhost:8000/video_feed/${demoCamera.cameraId}/${data.filename}`);
+        showToast(`Video processing started using camera: ${demoCamera.label}!`);
       } else {
         throw new Error('Failed to upload video');
       }
     } catch (err) {
       setError(err.message);
+      showToast('Failed to upload video. Please try again.');
     } finally {
       setIsProcessing(false);
     }
@@ -773,6 +934,7 @@ const handleAddCamera = async (e) => {
 
   return (
     <div className="min-h-screen relative overflow-hidden">
+      <Toaster position="top-center" reverseOrder={false} />
       {/* Background Video */}
       <div className="fixed inset-0 z-0">
         <video
@@ -812,13 +974,13 @@ const handleAddCamera = async (e) => {
                 Fire detected at {activeAlert.location || 'your property'}
               </p>
               
-              <div className="text-6xl font-bold text-red-300 mb-6">
+              <div className="text-7xl font-bold text-red-500 mb-4">
                 {alertCountdown}
               </div>
               
               <div className="space-y-4">
                 <button
-                  onClick={cancelAlert}
+                  onClick={handleCancelAlert}
                   className="w-full px-6 py-4 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold transition-colors"
                 >
                   Turn Off Alert
@@ -1105,6 +1267,7 @@ const handleAddCamera = async (e) => {
                       camera={camera}
                       onCameraDeleted={fetchCameras}
                       onToggleMonitoring={fetchCameras}
+                      activeAlert={allActiveAlerts[camera.cameraId]}
                     />
                   ))}
                 </div>

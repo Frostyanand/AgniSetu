@@ -285,8 +285,17 @@ def video_feed(video_name: str):
     video_path = os.path.join(TEMP_DIR, video_name)
     if not os.path.exists(video_path):
         return JSONResponse(content={"error": "Video not found"}, status_code=404)
+    
+    # Extract camera_id from filename if it starts with camera_id_
+    camera_id = None
+    if '_' in video_name:
+        potential_camera_id = video_name.split('_')[0]
+        # Basic validation: camera IDs are typically alphanumeric and reasonable length
+        if potential_camera_id and len(potential_camera_id) < 100:
+            camera_id = potential_camera_id
+            print(f"[INFO] Extracted camera ID from filename: {camera_id}")
         
-    return StreamingResponse(process_video_stream(video_path), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(process_video_stream(video_path, camera_id=camera_id), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.get("/video_feed/{camera_id}/{video_name}")
 def video_feed_for_camera(camera_id: str, video_name: str):
@@ -305,6 +314,11 @@ def video_feed_for_camera(camera_id: str, video_name: str):
 def webcam_feed():
     """Streams processed video from the primary webcam (index 0)."""
     return StreamingResponse(process_video_stream(0), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.get("/webcam_feed/{camera_id}")
+def webcam_feed_for_camera(camera_id: str):
+    """Streams processed video from the primary webcam (index 0) with a specific camera ID."""
+    return StreamingResponse(process_video_stream(0, camera_id=camera_id), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.get("/snapshots/{image_id}")
 def get_snapshot(image_id: str):

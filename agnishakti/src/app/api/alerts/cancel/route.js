@@ -13,7 +13,7 @@ export async function POST(req) {
     // This sets status to CANCELLED_BY_USER
     await cancelAlertByUser(alertId, userEmail);
 
-    // We can now delete it immediately as requested
+    // As per the requirement, we delete the alert immediately after cancelling.
     await deleteAlert(alertId); 
 
     return NextResponse.json({ success: true, message: "Alert cancelled and deleted." });

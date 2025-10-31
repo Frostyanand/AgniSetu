@@ -619,7 +619,7 @@ async function runGeminiVerification(alertId, snapshotUrl) {
   try {
     console.log(`[NEXT_BACKEND] [Alert Pipeline] 3a. (Background) Gemini verification starting for ${alertId}...`);
 
-    const geminiRes = await verifyWithGemini({ imageUrl: snapshotUrl });
+  const geminiRes = await verifyWithGemini({ imageUrl: snapshotUrl });
 
     const alertRef = db.collection("alerts").doc(alertId);
     const alertDoc = await alertRef.get();
@@ -649,7 +649,7 @@ async function runGeminiVerification(alertId, snapshotUrl) {
 
 /**
  * [ALERT_PIPELINE] STEP 4 (NEW): The user's "Cancel" button.
- * This is called by the frontend modal.
+ * This is called by the new /cancel API route.
  */
 export async function cancelAlertByUser(alertId, userEmail) {
   console.log(`[NEXT_BACKEND] [Alert Pipeline] 5a. User attempting to CANCEL alert: ${alertId}`);
@@ -658,8 +658,8 @@ export async function cancelAlertByUser(alertId, userEmail) {
   if (!doc.exists) throw new Error("Alert not found");
 
   const status = doc.data().status;
-  // User can cancel as long as emails aren't already being sent
-  if (status === "PENDING" || status === "CONFIRMED_BY_GEMINI") {
+  // Allow cancellation if it's PENDING or if Gemini just rejected it (the race condition)
+  if (status === "PENDING" || status === "REJECTED_BY_GEMINI" || status === "CONFIRMED_BY_GEMINI") {
     await alertRef.set({ 
       status: "CANCELLED_BY_USER", 
       canceledBy: userEmail || "unknown_user",
@@ -672,6 +672,7 @@ export async function cancelAlertByUser(alertId, userEmail) {
     return { success: false, message: "Alert is already finalized." };
   }
 }
+
 
 /**
  * [ALERT_PIPELINE] STEP 5 (NEW): The "Email Gatekeeper"
@@ -745,7 +746,7 @@ export async function confirmAndSendAlerts(alertId) {
     console.log(`[NEXT_BACKEND] [Alert Pipeline] 8a. Sent email to Owner: ${owner.email}`);
 
     // Send Fire Station Email
-    if (station && station.email) {
+  if (station && station.email) {
       const subjectStation = `ALERT: Fire at ${house.address}`;
       const htmlStation = `<p>Fire alert at ${house.address}</p><p>House owner: ${owner.email}</p><p>Gemini AI has confirmed this is a real fire.</p><p><a href="${gpsLink}" target="_blank">Navigate</a></p>`;
       await sendAlertEmail({
@@ -1067,6 +1068,8 @@ export async function getActiveAlertsForOwner(ownerEmail) {
 
 /**
  * getAlertsByOwnerEmail
+ * Optimized to only fetch active alerts and recently resolved ones (last 2 minutes)
+ * to prevent Firestore quota exhaustion
  */
 export async function getAlertsByOwnerEmail(ownerEmail) {
   const safeEmail = normalizeEmail(ownerEmail);
@@ -1076,16 +1079,50 @@ export async function getAlertsByOwnerEmail(ownerEmail) {
   const houseIds = housesSnapshot.docs.map(doc => doc.id);
   
   if (houseIds.length === 0) return [];
-  
-  // Get alerts for all houses
+
   const alerts = [];
   const chunkSize = 10;
+  const twoMinutesAgo = admin.firestore.Timestamp.fromMillis(Date.now() - 2 * 60 * 1000);
+  
+  // Get active alerts and recently created alerts (last 2 minutes) in one query
+  // This reduces the number of Firestore queries significantly
   for (let i = 0; i < houseIds.length; i += chunkSize) {
     const chunk = houseIds.slice(i, i + chunkSize);
-    const alertsSnapshot = await db.collection("alerts").where("houseId", "in", chunk).get();
-    alertsSnapshot.forEach(doc => {
-      alerts.push({ id: doc.id, ...doc.data() });
-    });
+    try {
+      // Fetch alerts that are either active OR recently created (last 2 min)
+      // We'll filter by status in memory for the second part
+      const activeSnap = await db.collection("alerts")
+        .where("houseId", "in", chunk)
+        .where("status", "in", ["PENDING", "CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"])
+        .get();
+      activeSnap.forEach(doc => {
+        alerts.push({ id: doc.id, ...doc.data() });
+      });
+      
+      // Also get recently created alerts (last 2 minutes) that might be rejected/cancelled
+      // We fetch by createdAt and filter by status in memory to avoid complex queries
+      const recentSnap = await db.collection("alerts")
+        .where("houseId", "in", chunk)
+        .where("createdAt", ">=", twoMinutesAgo)
+        .get();
+      
+      recentSnap.forEach(doc => {
+        const alertData = doc.data();
+        // Only include if it's rejected/cancelled and not already in alerts array
+        if ((alertData.status === "REJECTED_BY_GEMINI" || alertData.status === "CANCELLED_BY_USER") &&
+            !alerts.find(a => a.id === doc.id)) {
+          alerts.push({ id: doc.id, ...alertData });
+        }
+      });
+    } catch (err) {
+      console.error("[NEXT_BACKEND] Error fetching alerts for chunk:", err.message);
+      // Continue with other chunks even if one fails
+      // If quota exceeded, at least return what we have
+      if (err.code === 8 || err.message.includes("Quota exceeded")) {
+        console.warn("[NEXT_BACKEND] Quota exceeded, returning partial results");
+        break; // Stop querying more chunks
+      }
+    }
   }
   
   return alerts;
