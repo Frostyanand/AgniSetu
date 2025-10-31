@@ -1,7 +1,7 @@
 // src/backend/backend.js
 // Server-side backend helper functions for Agnishakti
 // Use only from server (API routes or Node.js process).
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { db } from "@/lib/firebase"; // your firebase admin firestore instance
 import admin from "firebase-admin";
 import bcrypt from "bcryptjs";
@@ -111,21 +111,7 @@ export async function sendAlertEmail({ toEmail, subject, textBody, htmlBody, ima
   return info;
 }
 
-/**
- * Verify detection using Gemini
- * - Checks if fire is present or false alarm
- * - Also checks if image has sensitive content
- */
-export async function verifyWithGemini({ imageUrl }) {
-  // Always return true (fire detected) to bypass Gemini verification
-  return {
-    isFire: true,
-    score: 0.95,
-    reason: "Gemini verification bypassed - always return true",
-    sensitive: false,
-    sensitiveReason: "Skipped - verification bypassed"
-  };
-}
+// verifyWithGemini will be added later in the new alert pipeline section
 
 /** --------------------------
  * Users (docs keyed by normalized email)
@@ -543,173 +529,521 @@ export async function getProviderDashboardData(providerEmail) {
   return houses.map((h) => ({ ...h, activeAlerts: alertsByHouse[h.houseId] || [] }));
 }
 
-/** --------------------------
- * Alerts flow (triggered by Python service)
- * -------------------------- */
+// =================================================================
+// --- NEW MASTER ALERT PIPELINE (REPLACES OLD triggerAlert) ---
+// =================================================================
 
 /**
- * triggerAlert
- * - Creates alert document in 'alerts' collection (auto-created on first write)
- * - Verifies with Gemini AI (currently bypassed)
- * - Sends email notifications to owner and fire station
+ * [ALERT_PIPELINE] STEP 1 (NEW): Check for active alerts.
+ * This is our "spam protection" gatekeeper.
  */
-export async function triggerAlert(payload) {
-  const {
-    serviceKey,
-    cameraId,
-    className,
-    confidence,
-    bbox,
-    timestamp,
-    imageId,
-  } = payload;
+export async function checkActiveAlert(cameraId) {
+  console.log(`[NEXT_BACKEND] [Alert Spam Check] Checking for active alerts for camera: ${cameraId}`);
+  const q = db.collection("alerts")
+    .where("cameraId", "==", cameraId)
+    .where("status", "in", [
+      "PENDING", 
+      "CONFIRMED_BY_GEMINI", 
+      "SENDING_NOTIFICATIONS", 
+      "NOTIFIED_COOLDOWN"
+    ]);
 
-  if (!serviceKey || serviceKey !== process.env.SERVICE_KEY) {
-    throw { status: 401, message: "Invalid service key" };
-  }
-  if (!cameraId) throw new Error("cameraId required");
-
-  const camDoc = await db.collection("cameras").doc(cameraId).get();
-  if (!camDoc.exists) throw new Error("Camera not found");
-  const cam = camDoc.data();
-
-  const houseId = cam.houseId;
-  const houseDoc = await db.collection("houses").doc(houseId).get();
-  if (!houseDoc.exists) throw new Error("House not found");
-  const house = houseDoc.data();
-
-  const alertRef = db.collection("alerts").doc();
-  const alertId = alertRef.id;
-  const alertPayload = {
-    alertId,
-    cameraId,
-    houseId,
-    detectedClass: className,
-    confidence: confidence || 0,
-    bbox: bbox || null,
-    status: "PENDING",
-    timestamp: timestamp
-      ? admin.firestore.Timestamp.fromDate(new Date(timestamp))
-      : admin.firestore.FieldValue.serverTimestamp(),
-    framesToConfirm: payload.framesToConfirm || null,
-  };
-  await alertRef.set(alertPayload);
-
-  let snapshotUrl = null;
-  if (imageId) {
-    // Construct URL pointing to Python service for the image
-    const pythonServiceUrl = process.env.PYTHON_SERVICE_URL || "http://127.0.0.1:8000";
-    snapshotUrl = `${pythonServiceUrl}/snapshots/${imageId}`;
-    await alertRef.set({ detectionImage: snapshotUrl }, { merge: true });
-    console.log(`[ALERT] Image URL constructed: ${snapshotUrl}`);
+  const snap = await q.get();
+  if (snap.empty) {
+    console.log(`[NEXT_BACKEND] [Alert Spam Check] ✅ OK. No active alert found.`);
+    return null; // No active alert, OK to proceed.
   }
 
-  const geminiRes = await verifyWithGemini({ imageUrl: snapshotUrl });
-  if (!geminiRes.isFire) {
-    await alertRef.set(
-      { status: "CANCELLED", geminiCheck: geminiRes },
-      { merge: true }
-    );
-    return {
-      ok: true,
-      alertId,
-      status: "CANCELLED",
-      gemini: geminiRes,
-    };
-  }
-
-  await alertRef.set(
-    { status: "CONFIRMED", geminiCheck: geminiRes },
-    { merge: true }
-  );
-
-  const ownerEmail = house.ownerEmail;
-  const ownerDoc = await db.collection("users").doc(ownerEmail).get();
-  const owner = ownerDoc.exists ? ownerDoc.data() : { email: ownerEmail };
-
-  let station = null;
-  if (house.nearestFireStationId) {
-    const sDoc = await db
-      .collection("fireStations")
-      .doc(house.nearestFireStationId)
-      .get();
-    if (sDoc.exists) station = sDoc.data();
-  }
-  if (!station && house.coords) {
-    station = await findNearestFireStation(house.coords);
-  }
-
-  const gpsLink = house.coords
-    ? `http://maps.google.com/?q=${house.coords.lat},${house.coords.lng}`
-    : null;
-
-  const subjectOwner = `URGENT: Fire detected at your property (${
-    house.address || houseId
-  })`;
-  const htmlOwner = `<p>Dear ${owner.name || "Owner"},</p>
-    <p>We detected ${className} at your property (${
-    house.address || "address unavailable"
-  }) at ${new Date().toISOString()}.</p>
-    <p><a href="${gpsLink}" target="_blank">Open location in Google Maps</a></p>`;
-
-  const attachImage = !geminiRes.sensitive;
-
-  try {
-    await sendAlertEmail({
-      toEmail: owner.email || ownerEmail,
-      subject: subjectOwner,
-      htmlBody: attachImage
-        ? htmlOwner
-        : htmlOwner + "<p>⚠️ Image omitted for privacy reasons.</p>",
-      imageUrl: attachImage ? snapshotUrl : null,
-    });
-  } catch (err) {
-    console.error("Failed to send owner email", err);
-  }
-
-  if (station && station.email) {
-    const subjectStation = `ALERT: Fire at ${house.address || houseId}`;
-    const htmlStation = `<p>Fire alert at ${house.address || houseId}</p>
-      <p>House owner: ${owner.email || ""}</p>
-      <p><a href="${gpsLink}" target="_blank">Navigate</a></p>`;
-
-    try {
-      await sendAlertEmail({
-        toEmail: station.email,
-        subject: subjectStation,
-        htmlBody: attachImage
-          ? htmlStation
-          : htmlStation + "<p>⚠️ Image omitted for privacy reasons.</p>",
-        imageUrl: attachImage ? snapshotUrl : null,
-      });
-    } catch (err) {
-      console.error("Failed to send station email", err);
-    }
-  }
-
-  await alertRef.set(
-    {
-      status: "NOTIFIED",
-      sentEmails: {
-        ownerSent: true,
-        stationSent: !!(station && station.email),
-      },
-    },
-    { merge: true }
-  );
-
-  return { ok: true, alertId, status: "NOTIFIED", gemini: geminiRes };
+  const alertId = snap.docs[0].id;
+  console.warn(`[NEXT_BACKEND] [Alert Spam Check] ❌ REJECTED. Alert ${alertId} is already active.`);
+  return snap.docs[0].data();
 }
 
 /**
- * cancelAlert
+ * [ALERT_PIPELINE] STEP 2 (NEW): Create the "PENDING" alert.
+ * This is the "fast" function called by the frontend.
+ * It creates the alert and starts the Gemini check in the background.
  */
-export async function cancelAlert({ alertId, canceledByEmail, note = "Canceled by owner" }) {
+export async function createPendingAlert(payload) {
+  const { cameraId, className, confidence, bbox, timestamp, imageId } = payload;
+
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 1. createPendingAlert called for: ${cameraId}`);
+
+  // 1. Get Camera and House info
+  const camDoc = await db.collection("cameras").doc(cameraId).get();
+  if (!camDoc.exists) throw new Error("Camera not found");
+  const houseId = camDoc.data().houseId;
+
+  // 2. Build REAL snapshot URL
+  let snapshotUrl;
+  if (imageId.startsWith('http')) {
+    // It's already a full URL, use it as-is
+    snapshotUrl = imageId;
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 1a. Received a full URL for imageId.`);
+  } else {
+    // It's just a filename, build the URL
+    const pythonServiceUrl = process.env.PYTHON_SERVICE_URL || "http://127.0.0.1:8000";
+    snapshotUrl = `${pythonServiceUrl}/snapshots/${imageId}`;
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 1a. Built URL from imageId: ${snapshotUrl}`);
+  }
+
+  // 3. Create PENDING alert
+  const alertRef = db.collection("alerts").doc();
+  const alertPayload = {
+    alertId: alertRef.id,
+    cameraId,
+    houseId,
+    status: "PENDING", // User 30s-timer is now active
+    detectionImage: snapshotUrl, // The REAL, working URL
+    className, confidence, bbox,
+    createdAt: timestamp ? new Date(timestamp) : new Date(),
+    geminiCheck: null,
+  };
+  await alertRef.set(alertPayload);
+
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 2. PENDING alert ${alertRef.id} created.`);
+
+  // 4. Start Gemini check (Fire-and-forget, no await)
+  // This runs in the background
+  runGeminiVerification(alertRef.id, snapshotUrl);
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 3. Gemini check started (no-await).`);
+
+  return { alertId: alertRef.id };
+}
+
+/**
+ * [ALERT_PIPELINE] STEP 3 (NEW - Stolen from friend): Run Gemini check.
+ * This is the background task.
+ */
+async function runGeminiVerification(alertId, snapshotUrl) {
+  try {
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 3a. (Background) Gemini verification starting for ${alertId}...`);
+
+    const geminiRes = await verifyWithGemini({ imageUrl: snapshotUrl });
+
+    const alertRef = db.collection("alerts").doc(alertId);
+    const alertDoc = await alertRef.get();
+
+    // Only update if the alert is still PENDING (i.e., user hasn't cancelled)
+    if (alertDoc.exists && alertDoc.data().status === "PENDING") {
+      if (geminiRes.isFire) {
+        await alertRef.set({ status: "CONFIRMED_BY_GEMINI", geminiCheck: geminiRes }, { merge: true });
+        console.log(`[NEXT_BACKEND] [Alert Pipeline] 4a. (Background) Gemini confirmed REAL fire for ${alertId}.`);
+      } else {
+        await alertRef.set({ status: "REJECTED_BY_GEMINI", geminiCheck: geminiRes }, { merge: true });
+        console.log(`[NEXT_BACKEND] [Alert Pipeline] 4b. (Background) Gemini rejected FAKE fire for ${alertId}.`);
+      }
+    } else {
+       console.log(`[NEXT_BACKEND] [Alert Pipeline] 4c. (Background) Gemini finished, but alert ${alertId} was no longer PENDING (User may have cancelled). No update.`);
+    }
+  } catch (err) {
+    console.error(`[NEXT_BACKEND] [Alert Pipeline] 4d. (Background) Gemini verification FAILED for ${alertId}:`, err);
+    try {
+      await db.collection("alerts").doc(alertId).set({ 
+        status: "REJECTED_BY_GEMINI", 
+        geminiCheck: { isFire: false, reason: "Gemini API failed." }
+      }, { merge: true });
+    } catch (dbErr) {}
+  }
+}
+
+/**
+ * [ALERT_PIPELINE] STEP 4 (NEW): The user's "Cancel" button.
+ * This is called by the frontend modal.
+ */
+export async function cancelAlertByUser(alertId, userEmail) {
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 5a. User attempting to CANCEL alert: ${alertId}`);
   const alertRef = db.collection("alerts").doc(alertId);
   const doc = await alertRef.get();
   if (!doc.exists) throw new Error("Alert not found");
-  await alertRef.set({ status: "CANCELLED", canceledBy: canceledByEmail ? normalizeEmail(canceledByEmail) : null, cancelNote: note, canceledAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+  const status = doc.data().status;
+  // User can cancel as long as emails aren't already being sent
+  if (status === "PENDING" || status === "CONFIRMED_BY_GEMINI") {
+    await alertRef.set({ 
+      status: "CANCELLED_BY_USER", 
+      canceledBy: userEmail || "unknown_user",
+      canceledAt: admin.firestore.FieldValue.serverTimestamp() 
+    }, { merge: true });
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 5b. ✅ Success. Alert ${alertId} set to CANCELLED_BY_USER.`);
+    return { success: true };
+  } else {
+    console.warn(`[NEXT_BACKEND] [Alert Pipeline] 5c. ❌ FAILED to cancel alert ${alertId}. Status is already ${status}.`);
+    return { success: false, message: "Alert is already finalized." };
+  }
+}
+
+/**
+ * [ALERT_PIPELINE] STEP 5 (NEW): The "Email Gatekeeper"
+ * Called by frontend after 30s timer expires.
+ */
+export async function confirmAndSendAlerts(alertId) {
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 6. "Gatekeeper" (confirmAndSend) received for alert: ${alertId}`);
+
+  const alertRef = db.collection("alerts").doc(alertId);
+  const alertDoc = await alertRef.get();
+  if (!alertDoc.exists) {
+    console.error(`[NEXT_BACKEND] [Alert Pipeline] ❌ FAILED: Alert ${alertId} not found.`);
+    throw new Error("Alert not found.");
+  }
+
+  const alert = alertDoc.data();
+  const { status, cameraId, houseId, className, detectionImage, geminiCheck } = alert;
+
+  // This is the "Gatekeeper" logic
+  if (status === "CANCELLED_BY_USER") {
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 7a. Alert ${alertId} was CANCELLED BY USER. Deleting.`);
+    await deleteAlert(alertId);
+    return { ok: true, message: "Alert was cancelled by user." };
+  }
+
+  if (status === "REJECTED_BY_GEMINI") {
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 7b. Alert ${alertId} was REJECTED BY GEMINI. Deleting.`);
+    await deleteAlert(alertId);
+    return { ok: true, message: "Alert was rejected by Gemini." };
+  }
+
+  if (status === "NOTIFIED_COOLDOWN" || status === "SENDING_NOTIFICATIONS") {
+     console.warn(`[NEXT_BACKEND] [Alert Pipeline] 7c. Alert ${alertId} is already processing/sent. Doing nothing.`);
+     return { ok: true, message: "Alert already processed." };
+  }
+
+  if (status !== "CONFIRMED_BY_GEMINI") {
+    // This can happen if the timer expires *before* Gemini finishes (e.g., Gemini is slow)
+    console.warn(`[NEXT_BACKEND] [Alert Pipeline] 7d. ⏳ Alert ${alertId} is NOT YET confirmed by Gemini. Status: ${status}. Will retry.`);
+    return { ok: false, message: `Alert not confirmed. Status: ${status}` };
+  }
+
+  // --- IF WE REACH HERE, IT'S A "GO" ---
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 8. ✅ GO SIGNAL! Alert ${alertId} is CONFIRMED_BY_GEMINI. Sending emails...`);
+  await alertRef.set({ status: "SENDING_NOTIFICATIONS" }, { merge: true });
+
+  try {
+    // Now we run the "slow" email logic.
+    const houseDoc = await db.collection("houses").doc(houseId).get();
+    const house = houseDoc.data();
+    const ownerEmail = house.ownerEmail;
+    const ownerDoc = await db.collection("users").doc(ownerEmail).get();
+    const owner = ownerDoc.exists ? ownerDoc.data() : { email: ownerEmail };
+
+    // Use the existing findNearestFireStation function
+    const station = await findNearestFireStation(house.coords);
+
+    const gpsLink = house.coords ? `http://maps.google.com/?q=${house.coords.lat},${house.coords.lng}` : null;
+    const attachImage = !geminiCheck.sensitive;
+    const snapshotUrl = detectionImage; // Use the real URL from the alert doc
+
+    // Send Owner Email
+    const subjectOwner = `URGENT: Fire detected at ${house.address}`;
+    const htmlOwner = `<p>Dear ${owner.name || "Owner"},</p><p>We detected ${className} at your property (${house.address}). Gemini AI has confirmed this is a real fire.</p><p><a href="${gpsLink}" target="_blank">Open location in Google Maps</a></p>`;
+    await sendAlertEmail({
+      toEmail: owner.email || ownerEmail,
+      subject: subjectOwner,
+      htmlBody: htmlOwner,
+      imageUrl: attachImage ? snapshotUrl : null,
+    });
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 8a. Sent email to Owner: ${owner.email}`);
+
+    // Send Fire Station Email
+    if (station && station.email) {
+      const subjectStation = `ALERT: Fire at ${house.address}`;
+      const htmlStation = `<p>Fire alert at ${house.address}</p><p>House owner: ${owner.email}</p><p>Gemini AI has confirmed this is a real fire.</p><p><a href="${gpsLink}" target="_blank">Navigate</a></p>`;
+      await sendAlertEmail({
+        toEmail: station.email,
+        subject: subjectStation,
+        htmlBody: htmlStation,
+        imageUrl: attachImage ? snapshotUrl : null,
+      });
+      console.log(`[NEXT_BACKEND] [Alert Pipeline] 8b. Sent email to Station: ${station.email}`);
+    }
+
+    // 9. Set to "Cooldown"
+    await alertRef.set({
+      status: "NOTIFIED_COOLDOWN",
+      cooldownExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 10 * 60 * 1000), // 10 mins
+      sentEmails: { ownerSent: true, stationSent: !!(station && station.email) },
+    }, { merge: true });
+
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 9. ✅ Emails sent. Alert ${alertId} set to NOTIFIED_COOLDOWN.`);
+    return { ok: true, alertId, status: "NOTIFIED_COOLDOWN" };
+
+  } catch (emailErr) {
+    console.error(`[NEXT_BACKEND] [Alert Pipeline] 10. ❌ CRITICAL: Email sending failed for ${alertId}.`, emailErr);
+    await alertRef.set({ status: "CONFIRMED_BY_GEMINI", error: "Failed to send emails" }, { merge: true }); // Reset
+    return { ok: false, message: "Email sending failed." };
+  }
+}
+
+/**
+ * [ALERT_PIPELINE] STEP 6 (NEW): Update the image during cooldown.
+ * This is for the 30s image update.
+ */
+export async function updateAlertImage(alertId, newImageId) {
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] Cooldown: Updating image for ${alertId} to ${newImageId}`);
+  const pythonServiceUrl = process.env.PYTHON_SERVICE_URL || "http://127.0.0.1:8000";
+  const snapshotUrl = `${pythonServiceUrl}/snapshots/${newImageId}`;
+
+  await db.collection("alerts").doc(alertId).set({
+    detectionImage: snapshotUrl,
+    lastImageUpdate: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return { success: true, newImageUrl: snapshotUrl };
+}
+
+/**
+ * [ALERT_PIPELINE] STEP 7 (NEW): The cleanup functions.
+ * This is for your auto-delete requirement.
+ */
+export async function deleteAlert(alertId) {
+  await db.collection("alerts").doc(alertId).delete();
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] Cleanup: Deleted alert ${alertId}.`);
   return { success: true };
+}
+
+// This is for a cron job to run to clean up old alerts
+export async function cleanupResolvedAlerts() {
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] Cron: Running cleanupResolvedAlerts...`);
+  const now = admin.firestore.Timestamp.now();
+  const q = db.collection("alerts")
+    .where("cooldownExpiresAt", "<=", now);
+
+  const snap = await q.get();
+  if (snap.empty) {
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] Cron: No resolved alerts to delete.`);
+    return { deleted: 0 };
+  }
+
+  const deletePromises = [];
+  snap.docs.forEach(doc => {
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] Cron: Deleting resolved alert ${doc.id}`);
+    deletePromises.push(doc.ref.delete());
+  });
+
+  await Promise.all(deletePromises);
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] Cron: Cleaned up ${snap.size} resolved alerts.`);
+  return { deleted: snap.size };
+}
+
+/**
+ * [ALERT_PIPELINE] Gemini AI Fire Verification
+ * Uses @google/genai library to verify fire detection with vision models.
+ */
+export async function verifyWithGemini({ imageUrl }) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const enableGemini = (process.env.ENABLE_GEMINI || "false").toLowerCase() === "true";
+
+  if (!enableGemini || !apiKey) {
+    console.warn("[NEXT_BACKEND] [Gemini] Verification disabled. Defaulting to FIRE DETECTED.");
+    return {
+      isFire: true, score: 0.95,
+      reason: "Gemini verification disabled - defaulting to fire detected",
+      sensitive: false, sensitiveReason: "Skipped - verification disabled"
+    };
+  }
+
+  // Fetch and prepare image
+  let imageParts = [];
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const mimeType = response.headers.get("content-type") || "image/jpeg";
+
+    imageParts = [{
+      inlineData: {
+        data: buffer.toString("base64"),
+        mimeType
+      }
+    }];
+  } catch (fetchError) {
+    console.error("[NEXT_BACKEND] [Gemini] Error fetching image:", fetchError.message);
+    return {
+      isFire: false, score: 0.0,
+      reason: `Failed to fetch image for verification: ${fetchError.message}`,
+      sensitive: false, sensitiveReason: "Could not analyze - image fetch failed"
+    };
+  }
+
+  try {
+    const genAI = new GoogleGenAI(apiKey);
+
+    // Try to discover available models, fallback to known working model
+    let availableModels = [];
+    let preferredModel = "gemini-2.0-flash-exp"; // Known to work with v1beta API
+    
+    try {
+      const modelsList = await genAI.models.list();
+      if (modelsList && Array.isArray(modelsList) && modelsList.length > 0) {
+        availableModels = modelsList.map(m => {
+          let name = m.name || m;
+          if (typeof name === 'string') {
+            name = name.replace(/^models\//, "");
+          }
+          return name;
+        });
+        
+        // Find preferred model from available list
+        const preferredOrder = [
+          "gemini-2.0-flash-exp",
+          "gemini-1.5-flash",
+          "gemini-1.5-pro",
+          "gemini-1.5-flash-latest",
+          "gemini-pro"
+        ];
+        
+        for (const preferred of preferredOrder) {
+          if (availableModels.includes(preferred)) {
+            preferredModel = preferred;
+            break;
+          }
+        }
+      }
+    } catch (listError) {
+      // Silently fallback to default model
+    }
+
+    // Define the AI prompt
+    const prompt = `You are an expert fire detection AI system. Analyze this image carefully and determine if there is ACTUAL FIRE present.
+
+    IMPORTANT CRITERIA:
+    1. REAL FIRE indicators:
+       - Visible flames (orange, red, yellow colors with characteristic flame shape)
+       - Active combustion with bright light emission
+       - Smoke accompanying flames
+       - Heat distortion or glow
+       - Fire spreading on materials
+
+    2. FALSE POSITIVES to reject:
+       - LED lights, lamps, or artificial lighting
+       - Reflections or glare from surfaces
+       - Sunlight or sunset colors
+       - TV/monitor screens showing fire
+       - Orange/red colored objects (clothing, decorations, etc.)
+       - Camera artifacts or lens flare
+       - Warning lights or indicators
+       - Small, controlled flames like a candle or lighter (unless they are on a flammable object).
+
+    3. SENSITIVE CONTENT check:
+       - Identify if image contains people in distress, injuries, or graphic content
+       - Note if privacy concerns exist (people in private spaces)
+
+    Respond in this EXACT JSON format:
+    {
+      "isFire": true/false,
+      "confidence": 0.0-1.0,
+      "reasoning": "detailed explanation of your analysis",
+      "fireIndicators": ["list specific fire indicators found"],
+      "falsePositiveReasons": ["if not fire, list why it might have been flagged"],
+      "sensitive": true/false,
+      "sensitiveReason": "explanation if sensitive content detected"
+    }
+
+    Be extremely accurate. Only return isFire:true if you are highly confident there is ACTUAL FIRE, not just fire-colored objects or lights.`;
+
+    // Construct payload and call API
+    const parts = [{ text: prompt }, ...imageParts];
+    
+    // Build model fallback list
+    const modelFallbacks = availableModels.length > 0 
+      ? [...new Set([preferredModel, ...availableModels.filter(m => m.includes("gemini"))])]
+      : ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"];
+
+    let result;
+    let lastError;
+    for (const modelName of modelFallbacks) {
+      try {
+        result = await genAI.models.generateContent({
+          model: modelName,
+          contents: [{ parts }]
+        });
+        break; // Success
+      } catch (modelError) {
+        lastError = modelError;
+        const errorStatus = modelError.status || modelError.error?.status || modelError.code || modelError.error?.code;
+        const errorMessage = modelError.message || JSON.stringify(modelError.error || modelError);
+        const is404 = errorStatus === 404 || errorStatus === "NOT_FOUND" || errorMessage.includes("404") || errorMessage.includes("not found");
+        const is429 = errorStatus === 429 || errorStatus === "RESOURCE_EXHAUSTED" || errorMessage.includes("429") || errorMessage.includes("Resource exhausted");
+        const hasMoreModels = modelFallbacks.indexOf(modelName) < modelFallbacks.length - 1;
+        
+        if ((is404 || is429) && hasMoreModels) {
+          continue; // Try next model
+        } else if (hasMoreModels) {
+          continue; // Try next model for other errors too
+        } else {
+          if (is429) {
+            throw new Error(`All models rate limited. Please wait and try again later.`);
+          }
+          throw modelError;
+        }
+      }
+    }
+    
+    if (!result) {
+      throw lastError || new Error("All models failed");
+    }
+
+    // Extract text from response (handles multiple response structures)
+    let text;
+    try {
+      if (result?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        text = result.candidates[0].content.parts[0].text;
+      } else if (result?.response?.text) {
+        text = typeof result.response.text === 'function' ? await result.response.text() : result.response.text;
+      } else if (result?.text) {
+        text = typeof result.text === 'function' ? await result.text() : result.text;
+      } else if (typeof result === 'string') {
+        text = result;
+      } else {
+        text = JSON.stringify(result);
+      }
+    } catch (textError) {
+      console.error("[NEXT_BACKEND] [Gemini] Error extracting text:", textError.message);
+      text = JSON.stringify(result);
+    }
+    
+    // Parse JSON response
+    let analysis;
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No valid JSON found in response");
+      analysis = JSON.parse(jsonMatch[0]);
+    } catch (parseError) {
+      console.error("[NEXT_BACKEND] [Gemini] ❌ Failed to parse JSON from AI response:", parseError);
+      const isFireMatch = text.toLowerCase().includes('"isFire": true') || text.toLowerCase().includes('"isFire":true');
+      return {
+        isFire: isFireMatch, score: isFireMatch ? 0.7 : 0.3,
+        reason: text.substring(0, 500), sensitive: false,
+        sensitiveReason: "Could not parse sensitivity check"
+      };
+    }
+
+    // Return formatted result
+    const isFire = analysis.isFire === true;
+    const confidence = typeof analysis.confidence === "number" ? analysis.confidence : (isFire ? 0.85 : 0.15);
+
+    return {
+      isFire, score: confidence,
+      reason: analysis.reasoning || "Fire detection completed",
+      fireIndicators: analysis.fireIndicators || [],
+      falsePositiveReasons: analysis.falsePositiveReasons || [],
+      sensitive: analysis.sensitive === true,
+      sensitiveReason: analysis.sensitiveReason || "No sensitive content detected"
+    };
+
+  } catch (error) {
+    console.error("[NEXT_BACKEND] [Gemini] Verification failed:", error.message);
+    return {
+      isFire: false, // Default to NO FIRE on error
+      score: 0.0,
+      reason: `Gemini verification failed: ${error.message}`,
+      sensitive: false,
+      sensitiveReason: "Could not verify - error occurred"
+    };
+  }
 }
 
 /**
@@ -725,7 +1059,7 @@ export async function getActiveAlertsForOwner(ownerEmail) {
   const results = [];
   for (let i = 0; i < houseIds.length; i += chunkSize) {
     const chunk = houseIds.slice(i, i + chunkSize);
-    const snap = await db.collection("alerts").where("houseId", "in", chunk).where("status", "in", ["PENDING", "CONFIRMED", "NOTIFIED"]).get();
+    const snap = await db.collection("alerts").where("houseId", "in", chunk).where("status", "in", ["PENDING", "CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"]).get();
     snap.forEach((d) => results.push(d.data()));
   }
   return results;
