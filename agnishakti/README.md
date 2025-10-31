@@ -566,6 +566,9 @@ Delete a house
 
 **Backend Function:** `deleteHouse(houseId)`
 - Permanently deletes house document
+- **Automatically deletes all associated camera documents** (cascade delete)
+- Queries the `cameras` collection for all cameras with matching `houseId`
+- Deletes each camera document to prevent orphaned data
 
 ---
 
@@ -596,14 +599,15 @@ Verify monitoring password for a house
 ### Camera Management
 
 #### POST `/api/cameras`
-Add a new camera to a house
+Creates a new camera document and links it to the specified houseId.
 
 **Request:**
 ```json
 {
-  "ownerEmail": "owner@example.com",
-  "cameraName": "Front Door Camera",
-  "streamUrl": "rtsp://192.168.1.100:554/stream"
+  "houseId": "house_id_123",
+  "label": "Front Door Camera",
+  "source": "rtsp://192.168.1.100:554/stream",
+  "streamType": "rtsp"
 }
 ```
 
@@ -619,9 +623,10 @@ Add a new camera to a house
 ```
 
 **Backend Function:** `addCamera({ houseId, label, source, streamType })`
-- Finds first house by owner email
-- Creates camera document in `cameras` collection
+- Creates camera document in `cameras` collection (auto-created on first write)
+- Links camera to specified house via `houseId`
 - Sets `isMonitoring: false` by default
+- `streamType` defaults to `'rtsp'` if not provided
 
 ---
 

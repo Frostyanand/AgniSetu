@@ -361,10 +361,10 @@ const handleAddCamera = async (e) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ownerEmail: email,
         houseId: selectedHouse.houseId,
-        cameraName: cameraForm.cameraName,
-        streamUrl: cameraForm.streamUrl
+        label: cameraForm.cameraName,
+        source: cameraForm.streamUrl,
+        streamType: 'rtsp'
       })
     });
 
@@ -376,11 +376,11 @@ const handleAddCamera = async (e) => {
     // Update the local state by adding the new camera
     setCameras(prev => {
         const newCameras = { ...prev };
-        const houseId = selectedHouse.houseId; // Correct casing
+        const houseId = selectedHouse.houseId;
         if (!newCameras[houseId]) {
             newCameras[houseId] = [];
         }
-        newCameras[houseId].push(newCameraData.camera); // Assuming the response returns the new camera object
+        newCameras[houseId].push(newCameraData.camera);
         return newCameras;
     });
 }else {

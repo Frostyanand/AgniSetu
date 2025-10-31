@@ -292,10 +292,29 @@ export async function verifyHousePassword(houseId, candidatePassword) {
 /**
  * deleteHouse
  * - Deletes a house document from Firestore.
+ * - Also deletes all associated camera documents (cascade delete)
  */
 export async function deleteHouse(houseId) {
   if (!houseId) throw new Error("houseId required");
+  
+  // First, find and delete all cameras associated with this house
+  console.log(`Deleting house ${houseId} and its associated cameras...`);
+  const camerasSnapshot = await db.collection("cameras").where("houseId", "==", houseId).get();
+  
+  if (!camerasSnapshot.empty) {
+    console.log(`Found ${camerasSnapshot.size} camera(s) to delete`);
+    // Delete each camera document
+    const deletePromises = camerasSnapshot.docs.map(doc => doc.ref.delete());
+    await Promise.all(deletePromises);
+    console.log(`Deleted ${camerasSnapshot.size} camera(s) for house ${houseId}`);
+  } else {
+    console.log(`No cameras found for house ${houseId}`);
+  }
+  
+  // Then delete the house document itself
   await db.collection("houses").doc(houseId).delete();
+  console.log(`House ${houseId} deleted successfully`);
+  
   return { success: true };
 }
 

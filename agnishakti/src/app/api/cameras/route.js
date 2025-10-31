@@ -1,40 +1,39 @@
-import { NextResponse } from "next/server"; // Fix #1: Added the missing import
+import { NextResponse } from "next/server";
 import {
   addCamera,
   getCamerasByOwnerEmail, // Correct function for GET
   deleteCamera,
-  getHousesByOwnerEmail,
 } from "@/app/backend";
 
 // POST /api/cameras → Add new camera
 export async function POST(req) {
   try {
-    const { ownerEmail, cameraName, streamUrl } = await req.json();
-    if (!ownerEmail || !cameraName || !streamUrl) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+    // Read the correct properties from the request body
+    const { houseId, label, source, streamType } = await req.json();
+
+    // Validate required fields
+    if (!houseId || !label || !source) {
+      return NextResponse.json({ 
+        success: false, 
+        message: "Missing required fields (houseId, label, source)." 
+      }, { status: 400 });
     }
 
-    const houses = await getHousesByOwnerEmail(ownerEmail);
-    if (!houses || houses.length === 0) {
-      return NextResponse.json({ error: "No house found for the provided owner email" }, { status: 404 });
-    }
+    // Call addCamera with the correct parameters
+    const camera = await addCamera({
+      houseId,
+      label,
+      source,
+      streamType: streamType || 'rtsp' // Default to rtsp
+    });
 
-    const houseId = houses[0].houseId;
-
-    // Fix #2: Call addCamera with a single object containing houseId
-    const newCameraData = {
-      houseId: houseId,
-      label: cameraName,
-      source: streamUrl,
-      streamType: "rtsp",
-    };
-    const camera = await addCamera(newCameraData);
-
-    return NextResponse.json({ success: true, camera });
-  } catch (err) {
-    console.error("Add camera error:", err);
-    // This line will now work because NextResponse is imported
-    return NextResponse.json({ error: "Failed to add camera" }, { status: 500 });
+    return NextResponse.json({ success: true, camera }, { status: 201 });
+  } catch (error) {
+    console.error("Add camera error:", error);
+    return NextResponse.json({ 
+      success: false, 
+      message: error.message 
+    }, { status: 500 });
   }
 }
 
