@@ -517,7 +517,11 @@ export async function getProviderDashboardData(providerEmail) {
   if (houseIds.length) {
     for (let i = 0; i < houseIds.length; i += chunkSize) {
       const chunk = houseIds.slice(i, i + chunkSize);
-      const alertsSnap = await db.collection("alerts").where("houseId", "in", chunk).where("status", "==", "CONFIRMED").get();
+      // Fetch active alerts that providers should see: confirmed, sending, or in cooldown
+      const alertsSnap = await db.collection("alerts")
+        .where("houseId", "in", chunk)
+        .where("status", "in", ["CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"])
+        .get();
       alertsSnap.forEach((a) => {
         const ad = a.data();
         alertsByHouse[ad.houseId] = alertsByHouse[ad.houseId] || [];
@@ -605,8 +609,12 @@ export async function createPendingAlert(payload) {
 
   // 4. Start Gemini check (Fire-and-forget, no await)
   // This runs in the background
-  runGeminiVerification(alertRef.id, snapshotUrl);
-  console.log(`[NEXT_BACKEND] [Alert Pipeline] 3. Gemini check started (no-await).`);
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 3. Starting Gemini check (fire-and-forget) for alert ${alertRef.id}...`);
+  runGeminiVerification(alertRef.id, snapshotUrl).catch(err => {
+    // Catch any unhandled errors in the background task
+    console.error(`[NEXT_BACKEND] [Alert Pipeline] 3x. Unhandled error in runGeminiVerification for ${alertRef.id}:`, err);
+  });
+  console.log(`[NEXT_BACKEND] [Alert Pipeline] 3. Gemini check started (no-await). Function call completed.`);
 
   return { alertId: alertRef.id };
 }
@@ -618,32 +626,75 @@ export async function createPendingAlert(payload) {
 async function runGeminiVerification(alertId, snapshotUrl) {
   try {
     console.log(`[NEXT_BACKEND] [Alert Pipeline] 3a. (Background) Gemini verification starting for ${alertId}...`);
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 3b. (Background) Snapshot URL: ${snapshotUrl}`);
 
-  const geminiRes = await verifyWithGemini({ imageUrl: snapshotUrl });
+    const geminiRes = await verifyWithGemini({ imageUrl: snapshotUrl });
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 3c. (Background) Gemini response received:`, {
+      isFire: geminiRes.isFire,
+      score: geminiRes.score,
+      reason: geminiRes.reason?.substring(0, 100)
+    });
 
     const alertRef = db.collection("alerts").doc(alertId);
     const alertDoc = await alertRef.get();
 
+    if (!alertDoc.exists) {
+      console.error(`[NEXT_BACKEND] [Alert Pipeline] 3d. (Background) Alert ${alertId} not found in database!`);
+      return;
+    }
+
+    const currentStatus = alertDoc.data().status;
+    console.log(`[NEXT_BACKEND] [Alert Pipeline] 3e. (Background) Current alert status: ${currentStatus}`);
+
     // Only update if the alert is still PENDING (i.e., user hasn't cancelled)
-    if (alertDoc.exists && alertDoc.data().status === "PENDING") {
+    if (currentStatus === "PENDING") {
+      const updateData = {
+        status: geminiRes.isFire ? "CONFIRMED_BY_GEMINI" : "REJECTED_BY_GEMINI",
+        geminiCheck: geminiRes,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp() // Track when status was updated
+      };
+      
+      console.log(`[NEXT_BACKEND] [Alert Pipeline] 3f. (Background) Updating alert ${alertId} with status: ${updateData.status}`);
+      
+      await alertRef.set(updateData, { merge: true });
+      
+      // Verify the update succeeded
+      const verifyDoc = await alertRef.get();
+      const verifyStatus = verifyDoc.exists ? verifyDoc.data().status : "NOT_FOUND";
+      console.log(`[NEXT_BACKEND] [Alert Pipeline] 3g. (Background) Update verified. New status: ${verifyStatus}`);
+      
       if (geminiRes.isFire) {
-        await alertRef.set({ status: "CONFIRMED_BY_GEMINI", geminiCheck: geminiRes }, { merge: true });
-        console.log(`[NEXT_BACKEND] [Alert Pipeline] 4a. (Background) Gemini confirmed REAL fire for ${alertId}.`);
+        console.log(`[NEXT_BACKEND] [Alert Pipeline] 4a. (Background) ✅ Gemini confirmed REAL fire for ${alertId}.`);
       } else {
-        await alertRef.set({ status: "REJECTED_BY_GEMINI", geminiCheck: geminiRes }, { merge: true });
-        console.log(`[NEXT_BACKEND] [Alert Pipeline] 4b. (Background) Gemini rejected FAKE fire for ${alertId}.`);
+        console.log(`[NEXT_BACKEND] [Alert Pipeline] 4b. (Background) ❌ Gemini rejected FAKE fire for ${alertId}.`);
       }
     } else {
-       console.log(`[NEXT_BACKEND] [Alert Pipeline] 4c. (Background) Gemini finished, but alert ${alertId} was no longer PENDING (User may have cancelled). No update.`);
+      console.log(`[NEXT_BACKEND] [Alert Pipeline] 4c. (Background) Gemini finished, but alert ${alertId} status is ${currentStatus} (not PENDING). No update.`);
     }
   } catch (err) {
-    console.error(`[NEXT_BACKEND] [Alert Pipeline] 4d. (Background) Gemini verification FAILED for ${alertId}:`, err);
-    try {
-      await db.collection("alerts").doc(alertId).set({ 
-        status: "REJECTED_BY_GEMINI", 
-        geminiCheck: { isFire: false, reason: "Gemini API failed." }
-      }, { merge: true });
-    } catch (dbErr) {}
+    console.error(`[NEXT_BACKEND] [Alert Pipeline] 4d. (Background) ❌ Gemini verification FAILED for ${alertId}:`, err);
+    console.error(`[NEXT_BACKEND] [Alert Pipeline] 4d. Error details:`, {
+      message: err.message,
+      stack: err.stack,
+      code: err.code,
+      details: err.details
+    });
+    
+      try {
+        const alertRef = db.collection("alerts").doc(alertId);
+        await alertRef.set({ 
+          status: "REJECTED_BY_GEMINI", 
+          geminiCheck: { 
+            isFire: false, 
+            reason: `Gemini API failed: ${err.message}`,
+            error: err.message
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp() // Track when status was updated
+        }, { merge: true });
+      console.log(`[NEXT_BACKEND] [Alert Pipeline] 4e. (Background) Alert ${alertId} marked as REJECTED_BY_GEMINI due to error.`);
+    } catch (dbErr) {
+      console.error(`[NEXT_BACKEND] [Alert Pipeline] 4f. (Background) ❌ Failed to update alert after Gemini error:`, dbErr);
+    }
   }
 }
 
@@ -834,8 +885,13 @@ export async function verifyWithGemini({ imageUrl }) {
   const apiKey = process.env.GEMINI_API_KEY;
   const enableGemini = (process.env.ENABLE_GEMINI || "false").toLowerCase() === "true";
 
+  console.log("[NEXT_BACKEND] [Gemini] verifyWithGemini called");
+  console.log("[NEXT_BACKEND] [Gemini] ENABLE_GEMINI:", enableGemini);
+  console.log("[NEXT_BACKEND] [Gemini] API Key present:", !!apiKey);
+  console.log("[NEXT_BACKEND] [Gemini] Image URL:", imageUrl);
+
   if (!enableGemini || !apiKey) {
-    console.warn("[NEXT_BACKEND] [Gemini] Verification disabled. Defaulting to FIRE DETECTED.");
+    console.warn("[NEXT_BACKEND] [Gemini] Verification disabled or API key missing. ENABLE_GEMINI=" + enableGemini + ", API_KEY_PRESENT=" + !!apiKey);
     return {
       isFire: true, score: 0.95,
       reason: "Gemini verification disabled - defaulting to fire detected",
@@ -1082,15 +1138,13 @@ export async function getAlertsByOwnerEmail(ownerEmail) {
 
   const alerts = [];
   const chunkSize = 10;
-  const twoMinutesAgo = admin.firestore.Timestamp.fromMillis(Date.now() - 2 * 60 * 1000);
   
-  // Get active alerts and recently created alerts (last 2 minutes) in one query
+  // Get active alerts and recently created rejected/cancelled alerts
   // This reduces the number of Firestore queries significantly
   for (let i = 0; i < houseIds.length; i += chunkSize) {
     const chunk = houseIds.slice(i, i + chunkSize);
     try {
-      // Fetch alerts that are either active OR recently created (last 2 min)
-      // We'll filter by status in memory for the second part
+      // Fetch active alerts
       const activeSnap = await db.collection("alerts")
         .where("houseId", "in", chunk)
         .where("status", "in", ["PENDING", "CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"])
@@ -1099,21 +1153,45 @@ export async function getAlertsByOwnerEmail(ownerEmail) {
         alerts.push({ id: doc.id, ...doc.data() });
       });
       
-      // Also get recently created alerts (last 2 minutes) that might be rejected/cancelled
-      // We fetch by createdAt and filter by status in memory to avoid complex queries
-      const recentSnap = await db.collection("alerts")
-        .where("houseId", "in", chunk)
-        .where("createdAt", ">=", twoMinutesAgo)
-        .get();
-      
-      recentSnap.forEach(doc => {
-        const alertData = doc.data();
-        // Only include if it's rejected/cancelled and not already in alerts array
-        if ((alertData.status === "REJECTED_BY_GEMINI" || alertData.status === "CANCELLED_BY_USER") &&
-            !alerts.find(a => a.id === doc.id)) {
-          alerts.push({ id: doc.id, ...alertData });
+      // Get recently created rejected/cancelled alerts (created in last 10 minutes)
+      // This includes alerts that were just rejected by Gemini or cancelled by user
+      // We use a longer window (10 min) to catch alerts that might have been created earlier
+      // but just got their status updated
+      try {
+        const tenMinutesAgo = admin.firestore.Timestamp.fromMillis(Date.now() - 10 * 60 * 1000);
+        const recentSnap = await db.collection("alerts")
+          .where("houseId", "in", chunk)
+          .where("status", "in", ["REJECTED_BY_GEMINI", "CANCELLED_BY_USER"])
+          .where("createdAt", ">=", tenMinutesAgo)
+          .get();
+        
+        recentSnap.forEach(doc => {
+          const alertData = doc.data();
+          // Only include if not already in alerts array
+          if (!alerts.find(a => a.id === doc.id)) {
+            alerts.push({ id: doc.id, ...alertData });
+          }
+        });
+      } catch (recentErr) {
+        // If the recent query fails (e.g., index not created), fall back to fetching all rejected/cancelled
+        // This is a safety net - in production you should create the required Firestore index
+        if (recentErr.code === 9 || recentErr.message.includes("index")) {
+          console.warn("[NEXT_BACKEND] Index required for recent alerts query. Fetching all rejected/cancelled alerts for this chunk as fallback.");
+          const allRejectedSnap = await db.collection("alerts")
+            .where("houseId", "in", chunk)
+            .where("status", "in", ["REJECTED_BY_GEMINI", "CANCELLED_BY_USER"])
+            .get();
+          
+          allRejectedSnap.forEach(doc => {
+            const alertData = doc.data();
+            if (!alerts.find(a => a.id === doc.id)) {
+              alerts.push({ id: doc.id, ...alertData });
+            }
+          });
+        } else {
+          throw recentErr; // Re-throw if it's not an index error
         }
-      });
+      }
     } catch (err) {
       console.error("[NEXT_BACKEND] Error fetching alerts for chunk:", err.message);
       // Continue with other chunks even if one fails
