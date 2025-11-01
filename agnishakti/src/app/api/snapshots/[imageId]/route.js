@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 // GET /api/snapshots/[imageId]
 export async function GET(req, { params }) {
   try {
-    const { imageId } = params;
+    const { imageId } = await params;
     
     if (!imageId) {
       return NextResponse.json({ error: "Image ID is required" }, { status: 400 });

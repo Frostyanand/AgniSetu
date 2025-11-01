@@ -7,7 +7,8 @@ import { getHouseById, updateHouse, deleteHouse } from "@/app/backend";
 export async function GET(req, { params }) {
   try {
     // Get the ID from the URL, e.g., the "abc-123" in /api/houses/abc-123
-    const houseId = params.id; 
+    const { id } = await params;
+    const houseId = id; 
 
     if (!houseId) {
       return NextResponse.json({ error: "House ID is required" }, { status: 400 });
@@ -25,7 +26,8 @@ export async function GET(req, { params }) {
 // PATCH /api/houses/[id] -> Update a house's details
 export async function PATCH(req, { params }) {
   try {
-    const houseId = params.id; // Get the ID from the URL
+    const { id } = await params;
+    const houseId = id; // Get the ID from the URL
     const updates = await req.json(); // Get the fields to update from the body
 
     if (!houseId) {
@@ -40,7 +42,8 @@ export async function PATCH(req, { params }) {
 // DELETE /api/houses/[id] -> Delete a house
 export async function DELETE(req, { params }) {
     try {
-        const houseId = params.id;
+        const { id } = await params;
+        const houseId = id;
         if (!houseId) {
             return NextResponse.json({ error: "House ID is required" }, { status: 400 });
         }

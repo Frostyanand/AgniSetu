@@ -52,10 +52,20 @@ src/
 
 2. **Background Video**:
    - 3D render video loop showing multiple houses with some burning
-   - Ethereal/atmospheric aesthetic
-   - Video should loop, auto-play, muted, playsInline
-   - Overlay: `bg-gradient-to-br from-slate-900/95 via-slate-800/90 to-slate-900/95 backdrop-blur-[1px]`
-   - Use a placeholder URL for now (will be replaced): `"https://sample-videos.com/zip/10/mp4/480/SampleVideo_1280x720_1mb.mp4"`
+   - Ethereal/atmospheric aesthetic (ethereal = dreamlike, otherworldly, glowing)
+   - Video should: loop, auto-play, muted, playsInline, object-cover
+   - Fixed positioning: `fixed inset-0 z-0`
+   - Overlay gradient: `bg-gradient-to-br from-slate-900/95 via-slate-800/90 to-slate-900/95 backdrop-blur-[1px]`
+   - Video element structure:
+   ```jsx
+   <div className="fixed inset-0 z-0">
+     <video autoPlay loop muted playsInline className="w-full h-full object-cover">
+       <source src={VIDEO_URL} type="video/mp4" />
+     </video>
+     <div className="absolute inset-0 bg-gradient-to-br from-slate-900/95 via-slate-800/90 to-slate-900/95 backdrop-blur-[1px]" />
+   </div>
+   ```
+   - Use placeholder URL: `"https://sample-videos.com/zip/10/mp4/480/SampleVideo_1280x720_1mb.mp4"` (user will replace with actual 3D render)
 
 3. **Animations**:
    - Use framer-motion for all interactive elements
@@ -79,23 +89,14 @@ src/
 
 ### 1. Data Fetching
 
-**IMPORTANT NOTE**: The backend function `getProviderDashboardData` currently filters alerts with status `"CONFIRMED"`, but the new alert pipeline uses statuses like `"CONFIRMED_BY_GEMINI"`, `"SENDING_NOTIFICATIONS"`, `"NOTIFIED_COOLDOWN"`. 
+**IMPORTANT NOTE**: The backend function `getProviderDashboardData` returns alerts with status: `CONFIRMED_BY_GEMINI`, `SENDING_NOTIFICATIONS`, `NOTIFIED_COOLDOWN`.
 
-**For the frontend**, you should filter alerts client-side to only show:
-- `CONFIRMED_BY_GEMINI` - Fire confirmed by Gemini AI
-- `SENDING_NOTIFICATIONS` - Emails being sent
-- `NOTIFIED_COOLDOWN` - Active cooldown period (10 minutes after emails sent)
+These are the only alerts that should appear in the provider dashboard:
+- `CONFIRMED_BY_GEMINI` - Fire confirmed by Gemini AI (active emergency)
+- `SENDING_NOTIFICATIONS` - Emails being sent (active emergency)
+- `NOTIFIED_COOLDOWN` - Active cooldown period (10 minutes after emails sent - still active)
 
-Filter out all other statuses (`PENDING`, `REJECTED_BY_GEMINI`, `CANCELLED_BY_USER`).
-
-**Example filtering**:
-```javascript
-const activeAlerts = dashboardData.flatMap(house => 
-  (house.activeAlerts || []).filter(alert => 
-    ['CONFIRMED_BY_GEMINI', 'SENDING_NOTIFICATIONS', 'NOTIFIED_COOLDOWN'].includes(alert.status)
-  )
-);
-```
+**Note**: The backend should already filter these correctly, but as a safety measure, you can also filter client-side if needed. The backend will NOT return `PENDING`, `REJECTED_BY_GEMINI`, or `CANCELLED_BY_USER` alerts.
 
 #### Initial Load
 **Endpoint**: `GET /api/provider/dashboard?providerEmail={email}`
@@ -291,6 +292,28 @@ const [houseDetailsCache, setHouseDetailsCache] = useState({}); // Cache house d
 ```
 
 ### Key Functions
+
+#### Timestamp Handling
+Firestore timestamps come as objects with `.toDate()` method or can be directly compared:
+```javascript
+// Convert Firestore timestamp to Date
+const getTimestamp = (timestamp) => {
+  if (!timestamp) return null;
+  if (timestamp.toDate) return timestamp.toDate();
+  if (timestamp instanceof Date) return timestamp;
+  if (typeof timestamp === 'object' && timestamp.seconds) {
+    return new Date(timestamp.seconds * 1000);
+  }
+  return new Date(timestamp);
+};
+
+// Format for display
+const formatDate = (timestamp) => {
+  const date = getTimestamp(timestamp);
+  if (!date) return 'N/A';
+  return date.toLocaleString(); // or use a date library like date-fns
+};
+```
 
 #### Toggle Alert Expansion
 ```javascript
@@ -552,6 +575,22 @@ All endpoints are already implemented:
 5. **Responsive**: Works on mobile and desktop
 6. **Accessible**: Proper ARIA labels, keyboard navigation
 7. **Performance**: Smooth animations, optimized renders
+8. **File Location**: Place in `src/app/provider/dashboard/page.js` (replace existing file)
+9. **Client Component**: Must include `'use client';` directive at the very top
+
+## EXAMPLE USAGE AFTER INTEGRATION
+
+The component will be automatically rendered when:
+- User is authenticated via `useAuth()` hook
+- User has role `"provider"` 
+- User navigates to `/provider/dashboard` route
+
+The component should:
+1. Check authentication and redirect if not logged in
+2. Fetch dashboard data on mount
+3. Poll for updates every 5 seconds
+4. Update images every 30 seconds
+5. Handle all edge cases gracefully
 
 ## EXPECTED OUTPUT
 
