@@ -330,6 +330,88 @@ def get_snapshot(image_id: str):
     
     return FileResponse(snapshot_path, media_type="image/jpeg")
 
+@app.post("/capture_frame/{camera_id}")
+async def capture_frame(camera_id: str):
+    """
+    Captures current frame from camera without triggering alerts.
+    Used for periodic image updates during active alerts.
+    Returns the imageId of the saved snapshot.
+    """
+    try:
+        # Get camera ID, or use default webcam (0) if camera_id not found
+        cap = cv2.VideoCapture(0)  # Using default webcam, can be enhanced to map camera_id to specific cameras
+        
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            return JSONResponse(
+                content={"error": "Failed to capture frame from camera"},
+                status_code=500
+            )
+        
+        # Save the frame without running inference (no alert trigger)
+        image_id = f"{uuid.uuid4()}.jpg"
+        snapshot_path = os.path.join(SNAPSHOT_DIR, image_id)
+        success = cv2.imwrite(snapshot_path, frame)
+        
+        if not success:
+            return JSONResponse(
+                content={"error": "Failed to save snapshot"},
+                status_code=500
+            )
+        
+        print(f"[PYTHON] [Capture Frame] Saved snapshot for camera {camera_id}: {image_id}")
+        return JSONResponse(content={"imageId": image_id, "cameraId": camera_id})
+        
+    except Exception as e:
+        print(f"[PYTHON] [Capture Frame] Error: {e}")
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
+
+@app.get("/latest_snapshot/{camera_id}")
+async def get_latest_snapshot(camera_id: str):
+    """
+    Returns the most recently saved snapshot ID for a camera.
+    This gets the latest snapshot from the saved_snapshots directory.
+    Used for periodic image updates during active alerts.
+    """
+    try:
+        if not os.path.exists(SNAPSHOT_DIR):
+            return JSONResponse(
+                content={"error": "Snapshot directory not found", "imageId": None},
+                status_code=404
+            )
+        
+        # Get all snapshot files
+        snapshot_files = [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith('.jpg')]
+        
+        if not snapshot_files:
+            return JSONResponse(
+                content={"error": "No snapshots found", "imageId": None},
+                status_code=404
+            )
+        
+        # Sort by modification time (most recent first)
+        snapshot_files.sort(
+            key=lambda x: os.path.getmtime(os.path.join(SNAPSHOT_DIR, x)),
+            reverse=True
+        )
+        
+        # Return the most recent snapshot
+        latest_image_id = snapshot_files[0]
+        print(f"[PYTHON] [Latest Snapshot] Returning latest snapshot for camera {camera_id}: {latest_image_id}")
+        return JSONResponse(content={"imageId": latest_image_id, "cameraId": camera_id})
+        
+    except Exception as e:
+        print(f"[PYTHON] [Latest Snapshot] Error: {e}")
+        return JSONResponse(
+            content={"error": str(e), "imageId": None},
+            status_code=500
+        )
+
 @app.post("/analyze_and_save_frame")
 async def analyze_and_save_frame(file: UploadFile = File(...)):
     """

@@ -228,6 +228,40 @@ const ProviderDashboard = () => {
   const [lastUpdateTime, setLastUpdateTime] = useState(new Date());
   const [isPolling, setIsPolling] = useState(true);
 
+  // Convert Python service URL to Next.js API proxy URL
+  const getPublicImageUrl = (imageUrl) => {
+    if (!imageUrl) return null;
+    
+    // If it's already a Next.js API URL, return as-is
+    if (imageUrl.includes('/api/snapshots/')) {
+      // If it's already a full URL, return as-is
+      if (imageUrl.startsWith('http')) {
+        return imageUrl;
+      }
+      // If it's relative, return as-is (browser will resolve it)
+      return imageUrl;
+    }
+    
+    // Extract imageId from Python service URL (e.g., http://127.0.0.1:8000/snapshots/uuid.jpg)
+    let imageId = null;
+    if (imageUrl.includes('/snapshots/')) {
+      imageId = imageUrl.split('/snapshots/')[1];
+      // Remove query params if any
+      imageId = imageId.split('?')[0];
+    } else if (imageUrl.startsWith('http')) {
+      // If it's a full URL but not our format, return as-is
+      return imageUrl;
+    } else {
+      // If it's just an imageId/filename, use it directly
+      imageId = imageUrl;
+    }
+    
+    if (!imageId) return imageUrl; // Fallback to original URL
+    
+    // Construct Next.js API proxy URL (relative URL works fine in browser)
+    return `/api/snapshots/${imageId}`;
+  };
+
   // Refs
   const pollIntervalRef = useRef(null);
   const imageIntervalRef = useRef(null);
@@ -500,11 +534,24 @@ const ProviderDashboard = () => {
     };
   }, [currentUser, isPolling]);
 
-  // Image Update Interval
+  // Image Update Interval - Trigger backend to update images every 30 seconds
   useEffect(() => {
-    imageIntervalRef.current = setInterval(() => {
-      setImageUpdateKey(Date.now());
-    }, IMAGE_UPDATE_INTERVAL);
+    const updateImages = async () => {
+      try {
+        await fetch('/api/alerts/update-images', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        // Also update the frontend cache-busting key
+        setImageUpdateKey(Date.now());
+      } catch (err) {
+        console.error('Error updating alert images:', err);
+      }
+    };
+
+    // Call immediately on mount, then every 30 seconds
+    updateImages();
+    imageIntervalRef.current = setInterval(updateImages, IMAGE_UPDATE_INTERVAL);
 
     return () => {
       if (imageIntervalRef.current) {
@@ -680,6 +727,7 @@ const ProviderDashboard = () => {
                       imageUpdateKey={imageUpdateKey}
                       onNavigate={navigateToLocation}
                       onMarkResponded={handleMarkAsResponded}
+                      getPublicImageUrl={getPublicImageUrl}
                       formatDate={formatDate}
                       formatTimeAgo={formatTimeAgo}
                     />
@@ -729,6 +777,7 @@ const AlertCard = ({
   imageUpdateKey,
   onNavigate,
   onMarkResponded,
+  getPublicImageUrl,
   formatDate,
   formatTimeAgo
 }) => {
@@ -841,7 +890,7 @@ const AlertCard = ({
                       </div>
                     ) : (
                       <img
-                        src={`${alert.detectionImage}?t=${imageUpdateKey}`}
+                        src={`${getPublicImageUrl ? getPublicImageUrl(alert.detectionImage) : alert.detectionImage}?t=${imageUpdateKey}`}
                         alt="Fire detection snapshot"
                         className="w-full h-auto"
                         onLoad={() => setImageLoading(false)}

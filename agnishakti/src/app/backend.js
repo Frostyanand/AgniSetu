@@ -90,6 +90,44 @@ function getMailTransporter() {
   return transporter;
 }
 
+/**
+ * Convert Python service URL to Next.js API proxy URL for external access
+ * Handles both full URLs and relative paths
+ */
+function getPublicImageUrl(imageUrl) {
+  if (!imageUrl) return null;
+  
+  // If it's already a Next.js API URL, return as-is
+  if (imageUrl.includes('/api/snapshots/')) {
+    // Extract the base URL from environment or use default
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'http://localhost:3000';
+    // If it's already a full URL, return as-is
+    if (imageUrl.startsWith('http')) {
+      return imageUrl;
+    }
+    // If it's relative, make it absolute
+    return `${baseUrl}${imageUrl.startsWith('/') ? imageUrl : '/' + imageUrl}`;
+  }
+  
+  // Extract imageId from Python service URL (e.g., http://127.0.0.1:8000/snapshots/uuid.jpg)
+  let imageId = null;
+  if (imageUrl.includes('/snapshots/')) {
+    imageId = imageUrl.split('/snapshots/')[1];
+  } else if (imageUrl.includes('http')) {
+    // If it's a full URL but not our format, return as-is (might be external)
+    return imageUrl;
+  } else {
+    // If it's just an imageId/filename, use it directly
+    imageId = imageUrl;
+  }
+  
+  if (!imageId) return imageUrl; // Fallback to original URL
+  
+  // Construct Next.js API proxy URL
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || 'http://localhost:3000';
+  return `${baseUrl}/api/snapshots/${imageId}`;
+}
+
 /** send alert email to owner and provider (one mail per recipient) */
 export async function sendAlertEmail({ toEmail, subject, textBody, htmlBody, imageUrl }) {
   const transporter = getMailTransporter();
@@ -104,7 +142,9 @@ export async function sendAlertEmail({ toEmail, subject, textBody, htmlBody, ima
   };
 
   if (imageUrl) {
-    mailOptions.html = (htmlBody || "") + `<p><a href="${imageUrl}" target="_blank">View detection image</a></p>`;
+    // Convert to public-accessible Next.js API URL
+    const publicImageUrl = getPublicImageUrl(imageUrl);
+    mailOptions.html = (htmlBody || "") + `<p><a href="${publicImageUrl}" target="_blank">View detection image</a></p><p><img src="${publicImageUrl}" alt="Fire detection snapshot" style="max-width: 100%; height: auto;" /></p>`;
   }
 
   const info = await transporter.sendMail(mailOptions);
@@ -558,9 +598,57 @@ export async function checkActiveAlert(cameraId) {
     return null; // No active alert, OK to proceed.
   }
 
-  const alertId = snap.docs[0].id;
-  console.warn(`[NEXT_BACKEND] [Alert Spam Check] ❌ REJECTED. Alert ${alertId} is already active.`);
-  return snap.docs[0].data();
+  const alertDoc = snap.docs[0];
+  const alertId = alertDoc.id;
+  const alertData = alertDoc.data();
+  
+  // Check if alert is stale (stuck for too long without updates)
+  const now = Date.now();
+  const createdAt = alertData.createdAt?.toDate ? alertData.createdAt.toDate().getTime() : new Date(alertData.createdAt).getTime();
+  const updatedAt = alertData.updatedAt?.toDate ? alertData.updatedAt.toDate().getTime() : (alertData.updatedAt ? new Date(alertData.updatedAt).getTime() : createdAt);
+  const ageSeconds = (now - createdAt) / 1000;
+  const lastUpdateSeconds = (now - updatedAt) / 1000;
+  
+  // If alert is PENDING and older than 2 minutes, or last updated more than 90 seconds ago, it's stale
+  // More aggressive cleanup to prevent blocking
+  const isStalePending = alertData.status === "PENDING" && (ageSeconds > 120 || lastUpdateSeconds > 90);
+  const isStaleConfirmed = alertData.status === "CONFIRMED_BY_GEMINI" && lastUpdateSeconds > 180; // 3 minutes without email sending
+  
+  if (isStalePending || isStaleConfirmed) {
+    console.warn(`[NEXT_BACKEND] [Alert Spam Check] ⚠️ Alert ${alertId} is STALE (status: ${alertData.status}, age: ${ageSeconds.toFixed(0)}s, lastUpdate: ${lastUpdateSeconds.toFixed(0)}s). Auto-cleaning...`);
+    
+    // Auto-clean stale alerts: delete them immediately to unblock new detections
+    try {
+      // Delete immediately to unblock - stale alerts should be removed
+      await deleteAlert(alertId);
+      console.log(`[NEXT_BACKEND] [Alert Spam Check] ✅ Deleted stale ${alertData.status} alert ${alertId} (age: ${ageSeconds.toFixed(0)}s)`);
+      // Return null to allow new alert to proceed immediately
+      return null;
+    } catch (cleanupErr) {
+      console.error(`[NEXT_BACKEND] [Alert Spam Check] ❌ Failed to clean stale alert ${alertId}:`, cleanupErr);
+      // Even if cleanup fails, try to proceed (better than being stuck forever)
+      return null;
+    }
+  }
+  
+  // Check NOTIFIED_COOLDOWN expiry
+  if (alertData.status === "NOTIFIED_COOLDOWN" && alertData.cooldownExpiresAt) {
+    const cooldownExpiry = alertData.cooldownExpiresAt.toDate ? alertData.cooldownExpiresAt.toDate().getTime() : new Date(alertData.cooldownExpiresAt).getTime();
+    if (now > cooldownExpiry) {
+      console.log(`[NEXT_BACKEND] [Alert Spam Check] ⏰ Cooldown expired for alert ${alertId}. Allowing new alerts.`);
+      // Delete the expired cooldown alert
+      try {
+        await db.collection("alerts").doc(alertId).delete();
+        console.log(`[NEXT_BACKEND] [Alert Spam Check] ✅ Deleted expired cooldown alert ${alertId}`);
+        return null; // OK to proceed
+      } catch (deleteErr) {
+        console.error(`[NEXT_BACKEND] [Alert Spam Check] ❌ Failed to delete expired alert:`, deleteErr);
+      }
+    }
+  }
+
+  console.warn(`[NEXT_BACKEND] [Alert Spam Check] ❌ REJECTED. Alert ${alertId} is already active (status: ${alertData.status}).`);
+  return alertData;
 }
 
 /**
@@ -580,6 +668,9 @@ export async function createPendingAlert(payload) {
 
   // 2. Build REAL snapshot URL
   let snapshotUrl;
+  if (!imageId) {
+    throw new Error("imageId is required");
+  }
   if (imageId.startsWith('http')) {
     // It's already a full URL, use it as-is
     snapshotUrl = imageId;
@@ -841,6 +932,114 @@ export async function updateAlertImage(alertId, newImageId) {
   }, { merge: true });
 
   return { success: true, newImageUrl: snapshotUrl };
+}
+
+/**
+ * [ALERT_PIPELINE] STEP 8: Update images for active alerts every 30 seconds
+ * This function requests new snapshots from Python service for active alerts
+ */
+export async function updateActiveAlertImages() {
+  try {
+    console.log(`[NEXT_BACKEND] [Image Update] Starting periodic image update for active alerts...`);
+    
+    // Get all active alerts
+    const activeStatuses = ["CONFIRMED_BY_GEMINI", "SENDING_NOTIFICATIONS", "NOTIFIED_COOLDOWN"];
+    const activeAlertsSnapshot = await db.collection("alerts")
+      .where("status", "in", activeStatuses)
+      .get();
+    
+    if (activeAlertsSnapshot.empty) {
+      console.log(`[NEXT_BACKEND] [Image Update] No active alerts to update.`);
+      return { updated: 0 };
+    }
+
+    const pythonServiceUrl = process.env.PYTHON_SERVICE_URL || "http://127.0.0.1:8000";
+    let updatedCount = 0;
+    const updatePromises = [];
+
+    for (const alertDoc of activeAlertsSnapshot.docs) {
+      const alert = alertDoc.data();
+      const alertId = alertDoc.id;
+      const cameraId = alert.cameraId;
+      
+      // Skip if last update was less than 25 seconds ago (to avoid too frequent updates)
+      const lastUpdate = alert.lastImageUpdate;
+      if (lastUpdate) {
+        const lastUpdateTime = lastUpdate.toDate ? lastUpdate.toDate().getTime() : new Date(lastUpdate).getTime();
+        const secondsSinceUpdate = (Date.now() - lastUpdateTime) / 1000;
+        if (secondsSinceUpdate < 25) {
+          console.log(`[NEXT_BACKEND] [Image Update] Alert ${alertId} updated ${secondsSinceUpdate.toFixed(1)}s ago, skipping.`);
+          continue;
+        }
+      }
+
+      // Get the latest snapshot from Python service (from saved_snapshots directory)
+      // First try latest_snapshot, fallback to capture_frame if needed
+      updatePromises.push(
+        (async () => {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            // Try to get latest saved snapshot first (more efficient)
+            let response = await fetch(`${pythonServiceUrl}/latest_snapshot/${cameraId}`, {
+              method: 'GET',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              signal: controller.signal,
+            });
+            
+            // If no saved snapshot, capture a new one
+            if (response.status === 404) {
+              clearTimeout(timeoutId);
+              const controller2 = new AbortController();
+              const timeoutId2 = setTimeout(() => controller2.abort(), 5000);
+              
+              response = await fetch(`${pythonServiceUrl}/capture_frame/${cameraId}`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                signal: controller2.signal,
+              });
+              
+              clearTimeout(timeoutId2);
+            } else {
+              clearTimeout(timeoutId);
+            }
+            
+            if (!response.ok) {
+              throw new Error(`Python service returned ${response.status}`);
+            }
+            
+            const data = await response.json();
+            if (data.imageId) {
+              // Update alert with the latest snapshot (using same URL format)
+              await updateAlertImage(alertId, data.imageId);
+              console.log(`[NEXT_BACKEND] [Image Update] ✅ Updated image for alert ${alertId} (camera: ${cameraId}) to latest snapshot: ${data.imageId}`);
+              updatedCount++;
+            } else {
+              console.warn(`[NEXT_BACKEND] [Image Update] No imageId in response for alert ${alertId}`);
+            }
+          } catch (err) {
+            if (err.name === 'AbortError') {
+              console.error(`[NEXT_BACKEND] [Image Update] ❌ Timeout updating image for alert ${alertId}`);
+            } else {
+              console.error(`[NEXT_BACKEND] [Image Update] ❌ Failed to update image for alert ${alertId}: ${err.message}`);
+            }
+          }
+        })()
+      );
+    }
+
+    await Promise.all(updatePromises);
+    console.log(`[NEXT_BACKEND] [Image Update] ✅ Updated ${updatedCount} alert images.`);
+    return { updated: updatedCount };
+  } catch (error) {
+    console.error(`[NEXT_BACKEND] [Image Update] ❌ Error in updateActiveAlertImages:`, error);
+    return { updated: 0, error: error.message };
+  }
 }
 
 /**
